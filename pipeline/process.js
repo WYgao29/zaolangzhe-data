@@ -73,7 +73,9 @@ async function fetchFeed(file, ref = 'main') {
 /* ---------- 智谱调用（失败重试一次） ---------- */
 async function ai(messages, { maxTokens = 4096, timeout = 180000 } = {}) {
   if (DRY_RUN) return '(dry-run 跳过)';
-  const body = JSON.stringify({ model: MODEL, temperature: 0.3, max_tokens: maxTokens, messages });
+  // glm-5.3 系列始终思考（思考 token 计入 max_tokens）：用 low 档并预留足够输出预算，
+  // 否则长内容会"思考耗尽预算 → 正文输出为空"
+  const body = JSON.stringify({ model: MODEL, temperature: 0.3, max_tokens: maxTokens, thinking: { type: 'enabled', length: 'low' }, messages });
   const once = async () => {
     const res = await fetch(ZHIPU + '/chat/completions', {
       method: 'POST',
@@ -101,7 +103,7 @@ async function processTweet(p) {
   const text = await ai([
     { role: 'system', content: '你是专业的科技翻译。将英文推文翻译成简体中文：准确、简洁；@提及、链接、话题标签保留原样；专有名词与产品名保留英文；只输出译文，不要任何解释或引号。' },
     { role: 'user', content: p.text },
-  ], { maxTokens: 2048 });
+  ], { maxTokens: 8192 });
   p.textZh = text.trim();
 }
 
@@ -109,20 +111,57 @@ async function processPodcast(e) {
   const out = await ai([
     { role: 'system', content: '你是科技播客编辑。根据英文转录文本输出 JSON（直接输出 JSON，不要 markdown 代码块）：{"titleZh":"单集标题的简体中文翻译","summaryZh":"400 字左右的中文要点摘要：嘉宾是谁、聊了什么、3-5 条核心观点"}' },
     { role: 'user', content: `标题: ${e.title}\n转录文本:\n${cap(e.transcript, 60000)}` },
-  ], { maxTokens: 2048 });
+  ], { maxTokens: 8192 });
   const j = parseJSONLoose(out);
   if (!j.titleZh || !j.summaryZh) throw new Error('JSON 字段缺失');
   e.titleZh = String(j.titleZh); e.summaryZh = String(j.summaryZh);
 }
 
 async function processBlog(b) {
-  const out = await ai([
-    { role: 'system', content: '你是科技文章翻译编辑。将英文博客文章翻译成简体中文，输出 JSON（直接输出 JSON，不要 markdown 代码块）：{"titleZh":"标题翻译","contentZh":"正文全文翻译，保留 Markdown 结构，链接 URL 保持原样","summaryZh":"2-3 句中文摘要"}' },
-    { role: 'user', content: `标题: ${b.title}\n正文:\n${cap(b.content, 40000)}` },
-  ], { maxTokens: 16000, timeout: 420000 });
-  const j = parseJSONLoose(out);
-  if (!j.titleZh || !j.contentZh || !j.summaryZh) throw new Error('JSON 字段缺失');
-  b.titleZh = String(j.titleZh); b.contentZh = String(j.contentZh); b.summaryZh = String(j.summaryZh);
+  // 第 1 步：标题 + 摘要（小 JSON，稳定）
+  const meta = await ai([
+    { role: 'system', content: '你是科技文章编辑。输出 JSON（直接输出，不要代码块）：{"titleZh":"标题的简体中文翻译","summaryZh":"2-3 句中文内容摘要"}' },
+    { role: 'user', content: `标题: ${b.title}\n正文:\n${cap(b.content, 6000)}` },
+  ], { maxTokens: 8192 });
+  const mj = parseJSONLoose(meta);
+  if (!mj.titleZh || !mj.summaryZh) throw new Error('标题/摘要 JSON 字段缺失');
+  b.titleZh = String(mj.titleZh); b.summaryZh = String(mj.summaryZh);
+
+  // 第 2 步：正文翻译。glm-5.3 系列思考 token 不可控（实测会把 16k 预算全部花在思考上），
+  // 因此按段落切块逐段翻译（每块预算独立，天然规避"思考吃光预算→输出为空"）
+  const splitChunks = (text, size) => {
+    // 硬切：不依赖空行分段（很多文章没有空行），保证每块 ≤ size
+    const out = [];
+    let cur = '';
+    for (const para of (text || '').split('\n')) {
+      let line = para;
+      while (line.length > 0) {
+        const take = Math.min(size - cur.length - 1, line.length);
+        if (take <= 0) { out.push(cur); cur = ''; continue; }
+        cur += (cur ? '\n' : '') + line.slice(0, take);
+        line = line.slice(take);
+        if (cur.length >= size) { out.push(cur); cur = ''; }
+      }
+    }
+    if (cur.trim()) out.push(cur);
+    return out.length ? out : [text];
+  };
+  try {
+    const chunks = splitChunks(b.content, 8000);
+    const parts = [];
+    for (let ci = 0; ci < chunks.length; ci++) {
+      const out = await ai([
+        { role: 'system', content: '你是专业的科技文章翻译。将英文翻译成简体中文：保留 Markdown 结构与链接（URL 原样）；只输出译文。' },
+        { role: 'user', content: chunks[ci] },
+      ], { maxTokens: 8192, timeout: 420000 });
+      if (!out.trim()) throw new Error(`第 ${ci + 1} 块译文为空`);
+      parts.push(out.trim());
+    }
+    b.contentZh = parts.join('\n\n');
+  } catch (e) {
+    // 部分翻译失败不回滚标题/摘要：网页会回退展示英文正文
+    console.log(`    ↱ 正文翻译失败（${e.message}），保留英文正文`);
+  }
 }
 
 const PROCESSORS = { x: processTweet, podcasts: processPodcast, blogs: processBlog };
@@ -146,7 +185,7 @@ async function generateDigest(day, items) {
   const md = await ai([
     { role: 'system', content: '你是「造浪者」日报编辑。基于当天采集内容输出中文日报 Markdown：开头 "## 今日焦点" 一两句话点出最重要动向；然后 "## 播客" "## X 推文" "## 博客" 分节（空节跳过），每条 1-2 句中文摘要并保留原链接；结尾可加一行 "**编辑注**：…"。只基于材料，不编造。' },
     { role: 'user', content: L.join('\n').slice(0, 30000) },
-  ], { maxTokens: 4096 });
+  ], { maxTokens: 8192 });
   return md.trim();
 }
 
@@ -330,6 +369,15 @@ async function main() {
   }
   state.upstreamSha = newestSha || state.upstreamSha;
   fs.writeFileSync(statePath, JSON.stringify(state, null, 2));
+
+  // 主动刷新 jsDelivr 缓存（它对 main 分支有最长半天的缓存，不 purge 网页会读到旧数据）
+  if (!DRY_RUN) {
+    const purge = async (p) => {
+      try { await fetch('https://purge.jsdelivr.net/gh/WYgao29/zaolangzhe-data@main/' + p, { method: 'POST' }); console.log('  ↻ CDN 已刷新: ' + p); }
+      catch (e) { console.log('  CDN 刷新失败（不影响数据）: ' + p); }
+    };
+    for (const f of Object.values(FEEDS)) await purge(f);
+  }
 
   console.log(`\n完成：归档 { 推文 ${archive.x.x.reduce((n, b) => n + b.tweets.length, 0)} 条 · 播客 ${archive.podcasts.podcasts.length} 期 · 博客 ${archive.blogs.blogs.length} 篇 }，日报 ${Object.keys(state.digests).length} 份`);
 }
