@@ -236,21 +236,23 @@ async function main() {
     for (const b of feed.x.x || []) {
       for (const raw of b.tweets || []) {
         const key = 'x:' + raw.id;
-        if (!raw.id || state.items[key]) continue;
-        state.items[key] = 1;
+        if (!raw.id) continue;
+        if (state.items[key] || index.x.has(key)) { state.items[key] = 1; continue; } // 已入库：补记台账防重复
         collect('x', key, { ...raw, batchDay, handle: b.handle, builder: b.name || b.handle, bio: b.bio || '' },
                 { handle: b.handle, name: b.name, bio: b.bio });
       }
     }
     for (const raw of feed.podcasts.podcasts || []) {
       const key = 'pod:' + raw.guid;
-      if (!raw.guid || state.items[key]) continue;
+      if (!raw.guid) continue;
+      if (state.items[key] || index.podcasts.has(key)) { state.items[key] = 1; continue; }
       state.items[key] = 1;
       collect('podcasts', key, { ...raw, batchDay });
     }
     for (const raw of feed.blogs.blogs || []) {
       const key = 'blog:' + raw.url;
-      if (!raw.url || state.items[key]) continue;
+      if (!raw.url) continue;
+      if (state.items[key] || index.blogs.has(key)) { state.items[key] = 1; continue; }
       state.items[key] = 1;
       collect('blogs', key, { ...raw, batchDay });
     }
@@ -262,12 +264,34 @@ async function main() {
   if (DRY_RUN) { console.log('dry-run 结束，未调用 AI、未写文件。'); return; }
   if (totalNew > 0 && !KEY) { console.error('缺少 ZHIPU_API_KEY'); process.exit(1); }
 
+  // 只加工最近 3 天：窗口外的条目保留英文原版入库，不再消耗 AI
+  const RECENT_DAYS = 3;
+  const recentCutoff = dayKey(Date.now() - (RECENT_DAYS - 1) * DAY);
+  const isRecent = (it) => (it.batchDay || '') >= recentCutoff;
+
+  // 自愈：近 3 天内已入库但缺译文的条目（如上次运行被中断）重新排队
+  const requeue = (kind, map, keyOf, listOf) => {
+    for (const [key, wrap] of [...map]) {
+      const it = wrap.item || wrap;
+      if (!isRecent(it)) continue;
+      const missing = kind === 'x' ? !it.textZh : kind === 'podcasts' ? !it.summaryZh : !it.contentZh;
+      if (missing && !newItems[kind].some(x => x === it)) {
+        newItems[kind].push(it);
+        (newByDay[it.batchDay] ||= { x: [], podcasts: [], blogs: [] })[kind].push(it);
+      }
+    }
+  };
+  requeue('x', index.x);
+  requeue('podcasts', index.podcasts);
+  requeue('blogs', index.blogs);
+
   // AI 加工（有限并发 + 限额）
   const work = [
     ...newItems.x.map(item => ({ kind: 'x', item })),
     ...newItems.podcasts.map(item => ({ kind: 'podcasts', item })),
     ...newItems.blogs.map(item => ({ kind: 'blogs', item })),
-  ].slice(0, LIMIT === Infinity ? undefined : LIMIT);
+  ].filter(w => isRecent(w.item))
+   .slice(0, LIMIT === Infinity ? undefined : LIMIT);
   const skipped = totalNew - work.length;
   if (skipped > 0) console.log(`（--limit 生效：本次只处理 ${work.length} 条，剩余 ${skipped} 条下次运行）`);
 
@@ -289,7 +313,7 @@ async function main() {
 
   // 日报（每批次日一份）
   for (const [day, items] of Object.entries(newByDay)) {
-    if (state.digests[day]) continue;
+    if (state.digests[day] || day < recentCutoff) continue;
     if (!items.x.length && !items.podcasts.length && !items.blogs.length) continue;
     console.log(`生成日报 ${day} …`);
     try {
