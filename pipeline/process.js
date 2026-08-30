@@ -373,7 +373,7 @@ async function main() {
   // 主动刷新 jsDelivr 缓存（它对 main 分支有最长半天的缓存，不 purge 网页会读到旧数据）
   if (!DRY_RUN) {
     const purge = async (p) => {
-      try { await fetch('https://purge.jsdelivr.net/gh/WYgao29/zaolangzhe-data@main/' + p, { method: 'POST' }); console.log('  ↻ CDN 已刷新: ' + p); }
+      try { await fetch('https://purge.jsdelivr.net/gh/WYgao29/zaolangzhe-data@main/' + p); console.log('  ↻ CDN 已刷新: ' + p); }
       catch (e) { console.log('  CDN 刷新失败（不影响数据）: ' + p); }
     };
     for (const f of Object.values(FEEDS)) await purge(f);
