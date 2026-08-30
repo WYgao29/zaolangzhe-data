@@ -1,0 +1,170 @@
+const DAY = 86400000;
+const DAY_RE = /^\d{4}-\d{2}-\d{2}$/;
+const KINDS = ['x', 'podcasts', 'blogs'];
+
+export function beijingDay(ms) {
+  const date = new Date(ms);
+  if (Number.isNaN(date.getTime())) throw new Error('无效时间');
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit',
+  }).format(date);
+}
+
+export function itemKey(kind, item) {
+  const raw = kind === 'x' ? item?.id : kind === 'podcasts' ? item?.guid : kind === 'blogs' ? item?.url : null;
+  if (raw == null || String(raw).trim() === '') throw new Error(`${kind} 条目缺少唯一键`);
+  const prefix = kind === 'x' ? 'x:' : kind === 'podcasts' ? 'pod:' : 'blog:';
+  return prefix + String(raw);
+}
+
+function hasValue(value) {
+  return value !== undefined && value !== null && (typeof value !== 'string' || value.trim() !== '');
+}
+
+export function richnessScore(kind, item) {
+  const zhFields = kind === 'x' ? ['textZh'] : kind === 'podcasts' ? ['titleZh', 'summaryZh'] : ['titleZh', 'summaryZh', 'contentZh'];
+  const contentFields = kind === 'x' ? ['text'] : kind === 'podcasts' ? ['title', 'transcript'] : ['title', 'content'];
+  return zhFields.reduce((n, field) => n + (hasValue(item?.[field]) ? 10 : 0), 0)
+    + contentFields.reduce((n, field) => n + (hasValue(item?.[field]) ? 2 : 0), 0)
+    + Object.values(item || {}).reduce((n, value) => n + (hasValue(value) ? 1 : 0), 0);
+}
+
+export function mergeDuplicate(kind, older, newer) {
+  const preferred = richnessScore(kind, newer) >= richnessScore(kind, older) ? newer : older;
+  const fallback = preferred === newer ? older : newer;
+  const merged = { ...fallback, ...preferred };
+  for (const field of new Set([...Object.keys(fallback || {}), ...Object.keys(preferred || {})])) {
+    if (!hasValue(merged[field]) && hasValue(fallback[field])) merged[field] = fallback[field];
+    if (!hasValue(merged[field]) && hasValue(preferred[field])) merged[field] = preferred[field];
+  }
+  return merged;
+}
+
+export function dedupeItems(kind, items) {
+  const map = new Map();
+  let duplicates = 0;
+  for (const item of items || []) {
+    const key = itemKey(kind, item);
+    if (map.has(key)) {
+      duplicates++;
+      map.set(key, mergeDuplicate(kind, map.get(key), item));
+    } else {
+      map.set(key, { ...item });
+    }
+  }
+  return { items: [...map.values()], duplicates };
+}
+
+export function isSafeHTTPURL(raw) {
+  if (typeof raw !== 'string' || raw.trim() === '') return false;
+  try {
+    const value = new URL(raw);
+    return value.protocol === 'http:' || value.protocol === 'https:';
+  } catch {
+    return false;
+  }
+}
+
+function validationResult() {
+  return { errors: [], warnings: [] };
+}
+
+function recentCutoff(now) {
+  return beijingDay(now - 2 * DAY);
+}
+
+function reportMissing(result, recent, location, field) {
+  const list = recent ? result.errors : result.warnings;
+  list.push(`${location} 缺少 ${field}`);
+}
+
+export function validateDayFile(value, { now = Date.now() } = {}) {
+  const result = validationResult();
+  if (!value || typeof value !== 'object') {
+    result.errors.push('日分片必须是对象');
+    return result;
+  }
+  if (value.schemaVersion !== 2) result.errors.push('schemaVersion 必须为 2');
+  if (!DAY_RE.test(value.day || '')) result.errors.push('day 必须为 YYYY-MM-DD');
+  if (!value.generatedAt || Number.isNaN(Date.parse(value.generatedAt))) result.errors.push('generatedAt 无效');
+  const isRecent = DAY_RE.test(value.day || '') && value.day >= recentCutoff(now);
+  for (const kind of KINDS) {
+    if (!Array.isArray(value[kind])) {
+      result.errors.push(`${kind} 必须是数组`);
+      continue;
+    }
+    const seen = new Set();
+    value[kind].forEach((item, index) => {
+      const location = `${kind}[${index}]`;
+      let key;
+      try { key = itemKey(kind, item); }
+      catch (error) { result.errors.push(`${location} ${error.message}`); return; }
+      if (seen.has(key)) result.errors.push(`${location} 分片内重复 ${key}`);
+      seen.add(key);
+      if (item.url && !isSafeHTTPURL(item.url)) result.errors.push(`${location}.url 必须是 http/https`);
+      if (kind === 'x') {
+        if (!hasValue(item.text)) result.errors.push(`${location} 缺少 text`);
+        if (!hasValue(item.textZh)) reportMissing(result, isRecent, location, 'textZh');
+      } else if (kind === 'podcasts') {
+        if (!hasValue(item.title)) result.errors.push(`${location} 缺少 title`);
+        if (!hasValue(item.titleZh)) reportMissing(result, isRecent, location, 'titleZh');
+        if (!hasValue(item.summaryZh)) reportMissing(result, isRecent, location, 'summaryZh');
+      } else {
+        if (!hasValue(item.title)) result.errors.push(`${location} 缺少 title`);
+        if (!hasValue(item.titleZh)) reportMissing(result, isRecent, location, 'titleZh');
+        if (!hasValue(item.summaryZh)) reportMissing(result, isRecent, location, 'summaryZh');
+        if (hasValue(item.content) && !hasValue(item.contentZh)) reportMissing(result, isRecent, location, 'contentZh');
+      }
+    });
+  }
+  return result;
+}
+
+export function buildIndex(dayFiles, generatedAt) {
+  const days = [...dayFiles.entries()]
+    .sort(([a], [b]) => b.localeCompare(a))
+    .map(([day, value]) => ({
+      day,
+      path: `data/days/${day}.json`,
+      counts: { x: value.x.length, podcasts: value.podcasts.length, blogs: value.blogs.length },
+    }));
+  return { schemaVersion: 2, generatedAt, days };
+}
+
+export function validateIndex(index, dayFiles, { now = Date.now() } = {}) {
+  const result = validationResult();
+  if (!index || typeof index !== 'object') {
+    result.errors.push('index 必须是对象');
+    return result;
+  }
+  if (index.schemaVersion !== 2) result.errors.push('index schemaVersion 必须为 2');
+  if (!Array.isArray(index.days) || index.days.length === 0) {
+    result.errors.push('index days 不得为空');
+    return result;
+  }
+  const sorted = [...index.days].sort((a, b) => b.day.localeCompare(a.day));
+  if (JSON.stringify(sorted.map(x => x.day)) !== JSON.stringify(index.days.map(x => x.day))) result.errors.push('index days 必须从新到旧排序');
+  const daySeen = new Set();
+  const itemSeen = new Map();
+  for (const entry of index.days) {
+    if (daySeen.has(entry.day)) result.errors.push(`index 日期重复 ${entry.day}`);
+    daySeen.add(entry.day);
+    if (entry.path !== `data/days/${entry.day}.json`) result.errors.push(`${entry.day} 路径无效`);
+    const file = dayFiles.get(entry.day);
+    if (!file) { result.errors.push(`${entry.day} 缺少日分片`); continue; }
+    const validation = validateDayFile(file, { now });
+    result.errors.push(...validation.errors.map(x => `${entry.day}: ${x}`));
+    result.warnings.push(...validation.warnings.map(x => `${entry.day}: ${x}`));
+    for (const kind of KINDS) {
+      if (entry.counts?.[kind] !== file[kind].length) result.errors.push(`${entry.day} ${kind} 计数不一致`);
+      for (const item of file[kind]) {
+        let key;
+        try { key = itemKey(kind, item); } catch { continue; }
+        if (itemSeen.has(key)) result.errors.push(`跨日重复 ${key}: ${itemSeen.get(key)} / ${entry.day}`);
+        else itemSeen.set(key, entry.day);
+      }
+    }
+  }
+  for (const day of dayFiles.keys()) if (!daySeen.has(day)) result.errors.push(`${day} 日分片未列入 index`);
+  return result;
+}
