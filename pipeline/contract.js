@@ -78,7 +78,7 @@ function reportMissing(result, recent, location, field) {
   list.push(`${location} 缺少 ${field}`);
 }
 
-export function validateDayFile(value, { now = Date.now() } = {}) {
+export function validateDayFile(value, { now = Date.now(), requireRecentTranslations = true } = {}) {
   const result = validationResult();
   if (!value || typeof value !== 'object') {
     result.errors.push('日分片必须是对象');
@@ -87,7 +87,7 @@ export function validateDayFile(value, { now = Date.now() } = {}) {
   if (value.schemaVersion !== 2) result.errors.push('schemaVersion 必须为 2');
   if (!DAY_RE.test(value.day || '')) result.errors.push('day 必须为 YYYY-MM-DD');
   if (!value.generatedAt || Number.isNaN(Date.parse(value.generatedAt))) result.errors.push('generatedAt 无效');
-  const isRecent = DAY_RE.test(value.day || '') && value.day >= recentCutoff(now);
+  const isRecent = requireRecentTranslations && DAY_RE.test(value.day || '') && value.day >= recentCutoff(now);
   for (const kind of KINDS) {
     if (!Array.isArray(value[kind])) {
       result.errors.push(`${kind} 必须是数组`);
@@ -131,7 +131,7 @@ export function buildIndex(dayFiles, generatedAt) {
   return { schemaVersion: 2, generatedAt, days };
 }
 
-export function validateIndex(index, dayFiles, { now = Date.now() } = {}) {
+export function validateIndex(index, dayFiles, { now = Date.now(), requireRecentTranslations = true } = {}) {
   const result = validationResult();
   if (!index || typeof index !== 'object') {
     result.errors.push('index 必须是对象');
@@ -152,7 +152,7 @@ export function validateIndex(index, dayFiles, { now = Date.now() } = {}) {
     if (entry.path !== `data/days/${entry.day}.json`) result.errors.push(`${entry.day} 路径无效`);
     const file = dayFiles.get(entry.day);
     if (!file) { result.errors.push(`${entry.day} 缺少日分片`); continue; }
-    const validation = validateDayFile(file, { now });
+    const validation = validateDayFile(file, { now, requireRecentTranslations });
     result.errors.push(...validation.errors.map(x => `${entry.day}: ${x}`));
     result.warnings.push(...validation.warnings.map(x => `${entry.day}: ${x}`));
     for (const kind of KINDS) {

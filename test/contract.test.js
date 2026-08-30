@@ -86,6 +86,13 @@ test('validateDayFile warns rather than fails for old missing translations', () 
   assert.ok(result.warnings.some(x => x.includes('textZh')));
 });
 
+test('validateDayFile can downgrade recent translation gaps during structural migration', () => {
+  const value = dayFile('2026-08-30', { x: [tweet({ textZh: '' })] });
+  const result = validateDayFile(value, { now: NOW, requireRecentTranslations: false });
+  assert.equal(result.errors.length, 0);
+  assert.ok(result.warnings.some(x => x.includes('textZh')));
+});
+
 test('buildIndex sorts days newest first and records literal counts', () => {
   const files = new Map([
     ['2026-08-29', dayFile('2026-08-29', { blogs: [blog()] })],
