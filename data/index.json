@@ -1,0 +1,33 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-08-30T06:55:52.607Z",
+  "days": [
+    {
+      "day": "2026-08-30",
+      "path": "data/days/2026-08-30.json",
+      "counts": {
+        "x": 18,
+        "podcasts": 1,
+        "blogs": 0
+      }
+    },
+    {
+      "day": "2026-08-29",
+      "path": "data/days/2026-08-29.json",
+      "counts": {
+        "x": 30,
+        "podcasts": 1,
+        "blogs": 2
+      }
+    },
+    {
+      "day": "2026-08-28",
+      "path": "data/days/2026-08-28.json",
+      "counts": {
+        "x": 29,
+        "podcasts": 1,
+        "blogs": 2
+      }
+    }
+  ]
+}

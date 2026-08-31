@@ -1,0 +1,10 @@
+{
+  "name": "zaolangzhe-data",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test",
+    "validate:data": "node scripts/validate-data.js",
+    "dry-run": "node pipeline/process.js --dry-run"
+  }
+}
