@@ -6,7 +6,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { beijingDay, buildIndex, validateIndex } from './contract.js';
+import { beijingDay, buildIndex, hasNonEmptyText, validateIndex } from './contract.js';
 import { atomicWriteJSON, buildWorkQueue, loadRepository, mergeIncoming, writeRepository } from './storage.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -38,9 +38,8 @@ const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 const cap = (value, limit) => String(value || '').slice(0, limit);
 
 export function requireAIText(value, label) {
-  const text = String(value || '').trim();
-  if (!text) throw new Error(`${label}为空`);
-  return text;
+  if (!hasNonEmptyText(value)) throw new Error(`${label}为空`);
+  return value.trim();
 }
 
 async function fetchJSON(url, options = {}) {
@@ -116,7 +115,7 @@ export async function processPodcast(item, aiCall = ai) {
 }
 
 export async function processBlog(item, aiCall = ai) {
-  if (String(item.summaryZh || '').trim()) return;
+  if (hasNonEmptyText(item.summaryZh)) return;
   const parsed = parseJSONLoose(await aiCall([
     { role: 'system', content: '你是科技文章编辑。直接输出 JSON：{"summaryZh":"2–3 句简体中文内容总结"}；概括核心事实和结论，不要逐段翻译。' },
     { role: 'user', content: `标题: ${item.title}\n正文:\n${cap(item.content, 6000)}` },

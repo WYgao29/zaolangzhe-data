@@ -65,6 +65,15 @@ test('dedupeItems merges complementary duplicates and preserves the richer summa
   );
 });
 
+test('dedupeItems never prefers a non-string summary over valid text', () => {
+  const result = dedupeItems('blogs', [
+    blog({ summaryZh: '有效总结', author: '' }),
+    blog({ summaryZh: { value: '伪总结' }, author: 'Author', extra: 'metadata' }),
+  ]);
+  assert.equal(result.items[0].summaryZh, '有效总结');
+  assert.equal(result.items[0].author, 'Author');
+});
+
 test('validateDayFile requires summaries and rejects removed translation fields', () => {
   const value = dayFile('2026-08-30', {
     x: [tweet({ summaryZh: '', textZh: '旧译文', url: 'javascript:alert(1)' })],
@@ -83,6 +92,20 @@ test('validateDayFile can downgrade missing summaries during structural migratio
   const result = validateDayFile(value, { now: NOW, requireAllSummaries: false });
   assert.equal(result.errors.length, 0);
   assert.ok(result.warnings.some(x => x.includes('summaryZh')));
+});
+
+test('validateDayFile requires English content and summaries to be non-empty strings', () => {
+  for (const invalid of [{}, [], 42]) {
+    const invalidSummary = validateDayFile(dayFile('2026-08-30', {
+      x: [tweet({ summaryZh: invalid })],
+    }));
+    assert.ok(invalidSummary.errors.some(error => error.includes('summaryZh')));
+
+    const invalidOriginal = validateDayFile(dayFile('2026-08-30', {
+      x: [tweet({ text: invalid })],
+    }));
+    assert.ok(invalidOriginal.errors.some(error => error.includes('text')));
+  }
 });
 
 test('buildIndex sorts days newest first and records literal counts', () => {

@@ -27,6 +27,12 @@ function dayFile(day, overrides = {}) {
   return { schemaVersion: 3, day, generatedAt: '2026-08-30T07:00:00Z', x: [], podcasts: [], blogs: [], ...overrides };
 }
 
+function writeRepositoryFixture(root, indexValue, dayValue) {
+  fs.mkdirSync(path.join(root, 'data', 'days'), { recursive: true });
+  fs.writeFileSync(path.join(root, 'data', 'index.json'), JSON.stringify(indexValue));
+  if (dayValue) fs.writeFileSync(path.join(root, 'data', 'days', `${dayValue.day}.json`), JSON.stringify(dayValue));
+}
+
 test('mergeIncoming adds new keys and preserves an existing summary', () => {
   const days = new Map([['2026-08-30', dayFile('2026-08-30', { x: [tweet('existing', '已有总结')] })]]);
   const result = mergeIncoming(days, {
@@ -53,13 +59,22 @@ test('mergeIncoming does not mark an identical upstream snapshot as changed', ()
 
 test('buildWorkQueue includes new items and recent summary gaps exactly once', () => {
   const days = new Map([
-    ['2026-08-30', dayFile('2026-08-30', { x: [tweet('new'), tweet('missing', '')] })],
+    ['2026-08-30', dayFile('2026-08-30', { x: [tweet('new', ''), tweet('missing', '')] })],
     ['2026-08-20', dayFile('2026-08-20', { x: [tweet('old-missing', '')] })],
   ]);
   const result = buildWorkQueue(days, { addedKeys: new Set(['x:new']), now: NOW });
   assert.deepEqual(result.work.map(x => x.key).sort(), ['x:missing', 'x:new']);
   assert.equal(result.newCount, 1);
   assert.equal(result.selfHealCount, 1);
+});
+
+test('buildWorkQueue does not spend AI tokens on a new item that already has a summary', () => {
+  const days = new Map([
+    ['2026-08-30', dayFile('2026-08-30', { x: [tweet('already-summarized')] })],
+  ]);
+  const result = buildWorkQueue(days, { addedKeys: new Set(['x:already-summarized']), now: NOW });
+  assert.equal(result.work.length, 0);
+  assert.equal(result.newCount, 0);
 });
 
 test('v3 migration queues old missing summaries when includeAllMissing is true', () => {
@@ -116,8 +131,48 @@ test('loadRepository migrates v2 shards in memory only when explicitly enabled',
   fs.rmSync(root, { recursive: true, force: true });
 });
 
+test('loadRepository refuses to migrate mixed or unsupported shard versions under a v2 index', () => {
+  for (const shardVersion of [3, 4]) {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'zaolangzhe-mixed-v2-'));
+    const shard = { ...dayFile('2026-08-30', { x: [tweet('one')] }), schemaVersion: shardVersion };
+    writeRepositoryFixture(root, {
+      schemaVersion: 2,
+      generatedAt: shard.generatedAt,
+      days: [{ day: shard.day, path: `data/days/${shard.day}.json`, counts: { x: 1, podcasts: 0, blogs: 0 } }],
+    }, shard);
+
+    assert.throws(() => loadRepository(root, { migrateV2: true }), /v2.*版本|版本.*v2/);
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('loadRepository rejects an invalid v2 shard path before reading it', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'zaolangzhe-path-v2-'));
+  writeRepositoryFixture(root, {
+    schemaVersion: 2,
+    generatedAt: '2026-08-30T07:00:00Z',
+    days: [{ day: '2026-08-30', path: '../secret.json', counts: { x: 0, podcasts: 0, blogs: 0 } }],
+  });
+
+  assert.throws(() => loadRepository(root, { migrateV2: true }), /路径/);
+  fs.rmSync(root, { recursive: true, force: true });
+});
+
+test('loadRepository rejects an invalid v3 shard path before reading it', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'zaolangzhe-path-v3-'));
+  writeRepositoryFixture(root, {
+    schemaVersion: 3,
+    generatedAt: '2026-08-30T07:00:00Z',
+    days: [{ day: '2026-08-30', path: '../secret.json', counts: { x: 0, podcasts: 0, blogs: 0 } }],
+  });
+
+  assert.throws(() => loadRepository(root), /路径/);
+  fs.rmSync(root, { recursive: true, force: true });
+});
+
 test('requireAIText rejects empty model output before state can advance', () => {
   assert.throws(() => requireAIText('   ', '推文总结'), /推文总结为空/);
+  assert.throws(() => requireAIText({ value: '伪总结' }, '推文总结'), /推文总结为空/);
   assert.equal(requireAIText('  有效内容  ', '推文总结'), '有效内容');
 });
 
@@ -152,4 +207,15 @@ test('blog processing makes one summary request and never writes a full translat
   assert.equal(item.contentZh, undefined);
   assert.equal(item.titleZh, undefined);
   assert.equal(calls.length, 1);
+});
+
+test('blog processing replaces a non-string summary instead of skipping AI', async () => {
+  const item = { title: 'Post', content: 'Long English body', summaryZh: { invalid: true } };
+  let calls = 0;
+  await processBlog(item, async () => {
+    calls++;
+    return '{"summaryZh":"有效的中文总结。"}';
+  });
+  assert.equal(calls, 1);
+  assert.equal(item.summaryZh, '有效的中文总结。');
 });

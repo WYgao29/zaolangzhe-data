@@ -54,3 +54,18 @@ test('migrateDayFileToV3 is stable for an existing v3 shard', () => {
   assert.equal(result.changed, false);
   assert.deepEqual(result.missingSummaryKeys, []);
 });
+
+test('migrateDayFileToV3 treats non-string summaries as missing', () => {
+  const source = {
+    schemaVersion: 2,
+    day: '2026-08-30',
+    generatedAt: '2026-08-30T06:55:52Z',
+    x: [{ id: 'x-1', text: 'English', summaryZh: { translated: true } }],
+    podcasts: [],
+    blogs: [],
+  };
+
+  const result = migrateDayFileToV3(source);
+
+  assert.deepEqual(result.missingSummaryKeys, ['x:x-1']);
+});

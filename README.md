@@ -57,7 +57,7 @@ npm run dry-run
 ZHIPU_API_KEY=你的密钥 node pipeline/process.js
 ```
 
-旧 v1 聚合文件只在一次性 v2 迁移前存在；`pipeline/migrate-v2.js` 仅保留作历史维护工具。当前 v2 到 v3 的转换由正式管线在内存中自动完成，无需本地写数据。
+旧 v1 聚合格式已停止支持。当前 v2 到 v3 的转换由正式管线在内存中自动完成，无需单独运行迁移脚本或本地写数据。
 
 ```bash
 gh workflow run pipeline.yml --repo WYgao29/zaolangzhe-data --ref main -f backfill_days=0

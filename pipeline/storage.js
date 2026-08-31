@@ -4,11 +4,12 @@ import path from 'node:path';
 import {
   beijingDay,
   buildIndex,
+  hasNonEmptyText,
   itemKey,
   mergeDuplicate,
   validateIndex,
 } from './contract.js';
-import { migrateDayFileToV3 } from './migrate-v3.js';
+import { migrateDayFileToV3, validateV2Archive, validateV2Index } from './migrate-v3.js';
 
 const DAY = 86400000;
 const KINDS = ['x', 'podcasts', 'blogs'];
@@ -17,13 +18,25 @@ function readJSON(file) {
   return JSON.parse(fs.readFileSync(file, 'utf8'));
 }
 
+function validateIndexPathsForRead(index) {
+  if (!Array.isArray(index?.days)) throw new Error('index days 必须是数组');
+  for (const entry of index.days) {
+    if (entry?.path !== `data/days/${entry?.day}.json`) {
+      throw new Error(`index 路径无效：${entry?.day || '未知日期'}`);
+    }
+  }
+}
+
 export function loadRepository(root, { migrateV2 = false, requireAllSummaries = true } = {}) {
   const indexPath = path.join(root, 'data', 'index.json');
   let index = readJSON(indexPath);
+  if (migrateV2 && index.schemaVersion === 2) validateV2Index(index);
+  validateIndexPathsForRead(index);
   const dayFiles = new Map();
   for (const entry of index.days || []) dayFiles.set(entry.day, readJSON(path.join(root, entry.path)));
   const migratedDays = new Set();
   if (migrateV2 && index.schemaVersion === 2) {
+    validateV2Archive(index, dayFiles);
     for (const [day, file] of dayFiles) {
       const migrated = migrateDayFileToV3(file);
       dayFiles.set(day, migrated.file);
@@ -102,7 +115,7 @@ export function mergeIncoming(dayFiles, incoming) {
 }
 
 function missingSummary(item) {
-  return !String(item.summaryZh || '').trim();
+  return !hasNonEmptyText(item.summaryZh);
 }
 
 export function buildWorkQueue(dayFiles, { addedKeys = new Set(), now = Date.now(), includeAllMissing = false } = {}) {
@@ -116,7 +129,7 @@ export function buildWorkQueue(dayFiles, { addedKeys = new Set(), now = Date.now
       for (const item of file[kind]) {
         const key = itemKey(kind, item);
         const isNew = addedKeys.has(key);
-        if (!isNew && !missingSummary(item)) continue;
+        if (!missingSummary(item)) continue;
         work.push({ kind, key, day, item });
         if (isNew) newCount++;
         else selfHealCount++;

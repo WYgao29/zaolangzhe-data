@@ -1,5 +1,6 @@
 const DAY_RE = /^\d{4}-\d{2}-\d{2}$/;
 const KINDS = ['x', 'podcasts', 'blogs'];
+const STRICT_TEXT_FIELDS = new Set(['summaryZh', 'text', 'title', 'transcript', 'content']);
 export const REMOVED_TRANSLATION_FIELDS = ['textZh', 'titleZh', 'contentZh', 'transcriptZh'];
 
 export function beijingDay(ms) {
@@ -21,11 +22,19 @@ function hasValue(value) {
   return value !== undefined && value !== null && (typeof value !== 'string' || value.trim() !== '');
 }
 
+export function hasNonEmptyText(value) {
+  return typeof value === 'string' && value.trim() !== '';
+}
+
+function fieldHasValue(field, value) {
+  return STRICT_TEXT_FIELDS.has(field) ? hasNonEmptyText(value) : hasValue(value);
+}
+
 export function richnessScore(kind, item) {
   const zhFields = ['summaryZh'];
   const contentFields = kind === 'x' ? ['text'] : kind === 'podcasts' ? ['title', 'transcript'] : ['title', 'content'];
-  return zhFields.reduce((n, field) => n + (hasValue(item?.[field]) ? 10 : 0), 0)
-    + contentFields.reduce((n, field) => n + (hasValue(item?.[field]) ? 2 : 0), 0)
+  return zhFields.reduce((n, field) => n + (fieldHasValue(field, item?.[field]) ? 10 : 0), 0)
+    + contentFields.reduce((n, field) => n + (fieldHasValue(field, item?.[field]) ? 2 : 0), 0)
     + Object.values(item || {}).reduce((n, value) => n + (hasValue(value) ? 1 : 0), 0);
 }
 
@@ -34,8 +43,8 @@ export function mergeDuplicate(kind, older, newer) {
   const fallback = preferred === newer ? older : newer;
   const merged = { ...fallback, ...preferred };
   for (const field of new Set([...Object.keys(fallback || {}), ...Object.keys(preferred || {})])) {
-    if (!hasValue(merged[field]) && hasValue(fallback[field])) merged[field] = fallback[field];
-    if (!hasValue(merged[field]) && hasValue(preferred[field])) merged[field] = preferred[field];
+    if (!fieldHasValue(field, merged[field]) && fieldHasValue(field, fallback[field])) merged[field] = fallback[field];
+    if (!fieldHasValue(field, merged[field]) && fieldHasValue(field, preferred[field])) merged[field] = preferred[field];
   }
   return merged;
 }
@@ -101,15 +110,15 @@ export function validateDayFile(value, { requireAllSummaries = true } = {}) {
         if (Object.hasOwn(item, field)) result.errors.push(`${location} 不允许翻译字段 ${field}`);
       }
       if (kind === 'x') {
-        if (!hasValue(item.text)) result.errors.push(`${location} 缺少 text`);
+        if (!hasNonEmptyText(item.text)) result.errors.push(`${location} 缺少 text`);
       } else if (kind === 'podcasts') {
-        if (!hasValue(item.title)) result.errors.push(`${location} 缺少 title`);
-        if (!hasValue(item.transcript)) result.errors.push(`${location} 缺少 transcript`);
+        if (!hasNonEmptyText(item.title)) result.errors.push(`${location} 缺少 title`);
+        if (!hasNonEmptyText(item.transcript)) result.errors.push(`${location} 缺少 transcript`);
       } else {
-        if (!hasValue(item.title)) result.errors.push(`${location} 缺少 title`);
-        if (!hasValue(item.content)) result.errors.push(`${location} 缺少 content`);
+        if (!hasNonEmptyText(item.title)) result.errors.push(`${location} 缺少 title`);
+        if (!hasNonEmptyText(item.content)) result.errors.push(`${location} 缺少 content`);
       }
-      if (!hasValue(item.summaryZh)) reportMissing(result, requireAllSummaries, location, 'summaryZh');
+      if (!hasNonEmptyText(item.summaryZh)) reportMissing(result, requireAllSummaries, location, 'summaryZh');
     });
   }
   return result;
