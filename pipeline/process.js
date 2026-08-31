@@ -1,12 +1,12 @@
 #!/usr/bin/env node
-/* 造浪者 v2 数据管线：抓上游 feed → 智谱加工 → 按北京时间批次日原子写入日分片。 */
+/* 造浪者 v3 数据管线：抓上游 feed → 智谱总结 → 按北京时间批次日原子写入日分片。 */
 'use strict';
 
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { beijingDay, buildIndex, validateIndex } from './contract.js';
+import { beijingDay, buildIndex, hasNonEmptyText, validateIndex } from './contract.js';
 import { atomicWriteJSON, buildWorkQueue, loadRepository, mergeIncoming, writeRepository } from './storage.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -38,9 +38,8 @@ const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 const cap = (value, limit) => String(value || '').slice(0, limit);
 
 export function requireAIText(value, label) {
-  const text = String(value || '').trim();
-  if (!text) throw new Error(`${label}为空`);
-  return text;
+  if (!hasNonEmptyText(value)) throw new Error(`${label}为空`);
+  return value.trim();
 }
 
 async function fetchJSON(url, options = {}) {
@@ -100,56 +99,28 @@ function parseJSONLoose(text) {
   return JSON.parse(cleaned.slice(start, end + 1));
 }
 
-async function processTweet(item) {
-  item.textZh = requireAIText(await ai([
-    { role: 'system', content: '你是专业的科技翻译。将英文推文翻译成简体中文：准确、简洁；@提及、链接、话题标签保留原样；专有名词与产品名保留英文；只输出译文，不要解释或引号。' },
+export async function processTweet(item, aiCall = ai) {
+  item.summaryZh = requireAIText(await aiCall([
+    { role: 'system', content: '你是科技资讯编辑。用简体中文总结英文推文的核心信息，通常 1–2 句、约 80 个中文字符以内；保留关键人物、产品名、数字和结论；忽略非关键链接、@提及和话题标签；不要逐句翻译，不要解释或加引号，只输出总结。' },
     { role: 'user', content: item.text },
-  ]), '推文译文');
+  ]), '推文总结');
 }
 
-async function processPodcast(item) {
-  const parsed = parseJSONLoose(await ai([
-    { role: 'system', content: '你是科技播客编辑。直接输出 JSON：{"titleZh":"简体中文标题","summaryZh":"约 400 字中文要点摘要"}' },
+export async function processPodcast(item, aiCall = ai) {
+  const parsed = parseJSONLoose(await aiCall([
+    { role: 'system', content: '你是科技播客编辑。直接输出 JSON：{"summaryZh":"约 400 字中文要点总结，包含嘉宾、主题和 3–5 条核心观点"}' },
     { role: 'user', content: `标题: ${item.title}\n转录文本:\n${cap(item.transcript, 60000)}` },
   ]));
-  item.titleZh = requireAIText(parsed.titleZh, '播客标题译文');
   item.summaryZh = requireAIText(parsed.summaryZh, '播客摘要');
 }
 
-function splitChunks(text, size = 8000) {
-  const chunks = [];
-  let rest = String(text || '');
-  while (rest.length) {
-    let end = Math.min(size, rest.length);
-    if (end < rest.length) {
-      const boundary = Math.max(rest.lastIndexOf('\n', end), rest.lastIndexOf(' ', end));
-      if (boundary > size * 0.6) end = boundary;
-    }
-    chunks.push(rest.slice(0, end));
-    rest = rest.slice(end).replace(/^\s+/, '');
-  }
-  return chunks;
-}
-
-async function processBlog(item) {
-  if (!String(item.titleZh || '').trim() || !String(item.summaryZh || '').trim()) {
-    const parsed = parseJSONLoose(await ai([
-      { role: 'system', content: '你是科技文章编辑。直接输出 JSON：{"titleZh":"简体中文标题","summaryZh":"2-3 句中文摘要"}' },
-      { role: 'user', content: `标题: ${item.title}\n正文:\n${cap(item.content, 6000)}` },
-    ]));
-    item.titleZh = requireAIText(parsed.titleZh, '博客标题译文');
-    item.summaryZh = requireAIText(parsed.summaryZh, '博客摘要');
-  }
-  if (String(item.content || '').trim() && !String(item.contentZh || '').trim()) {
-    const parts = [];
-    for (const chunk of splitChunks(item.content)) {
-      parts.push(requireAIText(await ai([
-        { role: 'system', content: '你是专业的科技文章翻译。将英文翻译成简体中文，保留 Markdown 和链接 URL，只输出译文。' },
-        { role: 'user', content: chunk },
-      ], { timeout: 420000 }), '博客正文译文'));
-    }
-    item.contentZh = requireAIText(parts.join('\n\n'), '博客正文译文');
-  }
+export async function processBlog(item, aiCall = ai) {
+  if (hasNonEmptyText(item.summaryZh)) return;
+  const parsed = parseJSONLoose(await aiCall([
+    { role: 'system', content: '你是科技文章编辑。直接输出 JSON：{"summaryZh":"2–3 句简体中文内容总结"}；概括核心事实和结论，不要逐段翻译。' },
+    { role: 'user', content: `标题: ${item.title}\n正文:\n${cap(item.content, 6000)}` },
+  ]));
+  item.summaryZh = requireAIText(parsed.summaryZh, '博客摘要');
 }
 
 const PROCESSORS = { x: processTweet, podcasts: processPodcast, blogs: processBlog };
@@ -204,12 +175,12 @@ async function purge(paths) {
 }
 
 export async function main() {
-  console.log(`造浪者 v2 管线 · 模型 ${MODEL} · 补加工 ${BACKFILL_DAYS} 天 · ${DRY_RUN ? 'DRY-RUN' : '正式'}`);
-  const repository = loadRepository(ROOT, { requireRecentTranslations: false });
+  console.log(`造浪者 v3 管线 · 模型 ${MODEL} · 补总结 ${BACKFILL_DAYS} 天 · ${DRY_RUN ? 'DRY-RUN' : '正式'}`);
+  const repository = loadRepository(ROOT, { migrateV2: true, requireAllSummaries: false });
   const state = readState();
   const snapshots = await collectSnapshots();
   const addedKeys = new Set();
-  const changedDays = new Set();
+  const changedDays = new Set(repository.migratedDays);
   let duplicateCount = 0;
   let fetched = 0;
   let newestSha = state.upstreamSha;
@@ -236,7 +207,10 @@ export async function main() {
   }
   if (!fetched) throw new Error('没有成功读取任何完整上游快照');
 
-  const queue = buildWorkQueue(repository.dayFiles, { addedKeys });
+  const queue = buildWorkQueue(repository.dayFiles, {
+    addedKeys,
+    includeAllMissing: repository.migratedDays.size > 0,
+  });
   const work = queue.work.slice(0, LIMIT === Infinity ? undefined : LIMIT);
   console.log(`待 AI 加工：新增 ${queue.newCount} · 自愈 ${queue.selfHealCount} · 重复 ${duplicateCount} · 本次 ${work.length}`);
   if (DRY_RUN) {
@@ -260,8 +234,9 @@ export async function main() {
         console.log(`  ✗ ${entry.kind} ${entry.key}：${error.message}`);
       }
     }));
-    if (changedDays.size) writeRepository(ROOT, repository.dayFiles, new Date().toISOString(), changedDays, { requireRecentTranslations: false });
   }
+
+  if (failed) throw new Error(`仍有 ${failed} 条 AI 加工失败`);
 
   const generatedAt = new Date().toISOString();
   const index = buildIndex(repository.dayFiles, generatedAt);
@@ -271,7 +246,6 @@ export async function main() {
   atomicWriteJSON(STATE_PATH, { upstreamSha: newestSha });
   await purge(['data/index.json', ...[...changedDays].map(day => `data/days/${day}.json`)]);
   console.log(`完成：成功 ${done}，失败 ${failed}，更新 ${changedDays.size} 天`);
-  if (failed) throw new Error(`仍有 ${failed} 条 AI 加工失败`);
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

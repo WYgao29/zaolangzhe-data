@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       backfill_days:
-        description: '补加工最近 N 天（0 = 只处理上游最新快照的新增内容）'
+        description: '补总结最近 N 天（0 = 只处理上游最新快照；v2 首次升级会自动补齐全部历史总结）'
         default: '0'
 
 permissions:
