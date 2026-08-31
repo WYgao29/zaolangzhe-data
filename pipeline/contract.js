@@ -1,6 +1,6 @@
-const DAY = 86400000;
 const DAY_RE = /^\d{4}-\d{2}-\d{2}$/;
 const KINDS = ['x', 'podcasts', 'blogs'];
+export const REMOVED_TRANSLATION_FIELDS = ['textZh', 'titleZh', 'contentZh', 'transcriptZh'];
 
 export function beijingDay(ms) {
   const date = new Date(ms);
@@ -22,7 +22,7 @@ function hasValue(value) {
 }
 
 export function richnessScore(kind, item) {
-  const zhFields = kind === 'x' ? ['textZh'] : kind === 'podcasts' ? ['titleZh', 'summaryZh'] : ['titleZh', 'summaryZh', 'contentZh'];
+  const zhFields = ['summaryZh'];
   const contentFields = kind === 'x' ? ['text'] : kind === 'podcasts' ? ['title', 'transcript'] : ['title', 'content'];
   return zhFields.reduce((n, field) => n + (hasValue(item?.[field]) ? 10 : 0), 0)
     + contentFields.reduce((n, field) => n + (hasValue(item?.[field]) ? 2 : 0), 0)
@@ -69,25 +69,20 @@ function validationResult() {
   return { errors: [], warnings: [] };
 }
 
-function recentCutoff(now) {
-  return beijingDay(now - 2 * DAY);
-}
-
-function reportMissing(result, recent, location, field) {
-  const list = recent ? result.errors : result.warnings;
+function reportMissing(result, required, location, field) {
+  const list = required ? result.errors : result.warnings;
   list.push(`${location} 缺少 ${field}`);
 }
 
-export function validateDayFile(value, { now = Date.now(), requireRecentTranslations = true } = {}) {
+export function validateDayFile(value, { requireAllSummaries = true } = {}) {
   const result = validationResult();
   if (!value || typeof value !== 'object') {
     result.errors.push('日分片必须是对象');
     return result;
   }
-  if (value.schemaVersion !== 2) result.errors.push('schemaVersion 必须为 2');
+  if (value.schemaVersion !== 3) result.errors.push('schemaVersion 必须为 3');
   if (!DAY_RE.test(value.day || '')) result.errors.push('day 必须为 YYYY-MM-DD');
   if (!value.generatedAt || Number.isNaN(Date.parse(value.generatedAt))) result.errors.push('generatedAt 无效');
-  const isRecent = requireRecentTranslations && DAY_RE.test(value.day || '') && value.day >= recentCutoff(now);
   for (const kind of KINDS) {
     if (!Array.isArray(value[kind])) {
       result.errors.push(`${kind} 必须是数组`);
@@ -102,19 +97,19 @@ export function validateDayFile(value, { now = Date.now(), requireRecentTranslat
       if (seen.has(key)) result.errors.push(`${location} 分片内重复 ${key}`);
       seen.add(key);
       if (item.url && !isSafeHTTPURL(item.url)) result.errors.push(`${location}.url 必须是 http/https`);
+      for (const field of REMOVED_TRANSLATION_FIELDS) {
+        if (Object.hasOwn(item, field)) result.errors.push(`${location} 不允许翻译字段 ${field}`);
+      }
       if (kind === 'x') {
         if (!hasValue(item.text)) result.errors.push(`${location} 缺少 text`);
-        if (!hasValue(item.textZh)) reportMissing(result, isRecent, location, 'textZh');
       } else if (kind === 'podcasts') {
         if (!hasValue(item.title)) result.errors.push(`${location} 缺少 title`);
-        if (!hasValue(item.titleZh)) reportMissing(result, isRecent, location, 'titleZh');
-        if (!hasValue(item.summaryZh)) reportMissing(result, isRecent, location, 'summaryZh');
+        if (!hasValue(item.transcript)) result.errors.push(`${location} 缺少 transcript`);
       } else {
         if (!hasValue(item.title)) result.errors.push(`${location} 缺少 title`);
-        if (!hasValue(item.titleZh)) reportMissing(result, isRecent, location, 'titleZh');
-        if (!hasValue(item.summaryZh)) reportMissing(result, isRecent, location, 'summaryZh');
-        if (hasValue(item.content) && !hasValue(item.contentZh)) reportMissing(result, isRecent, location, 'contentZh');
+        if (!hasValue(item.content)) result.errors.push(`${location} 缺少 content`);
       }
+      if (!hasValue(item.summaryZh)) reportMissing(result, requireAllSummaries, location, 'summaryZh');
     });
   }
   return result;
@@ -128,16 +123,16 @@ export function buildIndex(dayFiles, generatedAt) {
       path: `data/days/${day}.json`,
       counts: { x: value.x.length, podcasts: value.podcasts.length, blogs: value.blogs.length },
     }));
-  return { schemaVersion: 2, generatedAt, days };
+  return { schemaVersion: 3, generatedAt, days };
 }
 
-export function validateIndex(index, dayFiles, { now = Date.now(), requireRecentTranslations = true } = {}) {
+export function validateIndex(index, dayFiles, { requireAllSummaries = true } = {}) {
   const result = validationResult();
   if (!index || typeof index !== 'object') {
     result.errors.push('index 必须是对象');
     return result;
   }
-  if (index.schemaVersion !== 2) result.errors.push('index schemaVersion 必须为 2');
+  if (index.schemaVersion !== 3) result.errors.push('index schemaVersion 必须为 3');
   if (!Array.isArray(index.days) || index.days.length === 0) {
     result.errors.push('index days 不得为空');
     return result;
@@ -152,7 +147,7 @@ export function validateIndex(index, dayFiles, { now = Date.now(), requireRecent
     if (entry.path !== `data/days/${entry.day}.json`) result.errors.push(`${entry.day} 路径无效`);
     const file = dayFiles.get(entry.day);
     if (!file) { result.errors.push(`${entry.day} 缺少日分片`); continue; }
-    const validation = validateDayFile(file, { now, requireRecentTranslations });
+    const validation = validateDayFile(file, { requireAllSummaries });
     result.errors.push(...validation.errors.map(x => `${entry.day}: ${x}`));
     result.warnings.push(...validation.warnings.map(x => `${entry.day}: ${x}`));
     for (const kind of KINDS) {

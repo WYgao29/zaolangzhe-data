@@ -15,7 +15,7 @@ const NOW = Date.parse('2026-08-30T12:00:00Z');
 function tweet(overrides = {}) {
   return {
     id: 'x-1', handle: 'builder', builder: 'Builder', bio: '',
-    text: 'English', textZh: '中文', createdAt: '2026-08-30T01:00:00Z',
+    text: 'English', summaryZh: '中文总结', createdAt: '2026-08-30T01:00:00Z',
     url: 'https://x.com/builder/status/x-1', likes: 1, retweets: 2, replies: 3,
     ...overrides,
   };
@@ -24,15 +24,15 @@ function tweet(overrides = {}) {
 function blog(overrides = {}) {
   return {
     url: 'https://example.com/post', name: 'Example', title: 'Title',
-    titleZh: '标题', description: 'Description', summaryZh: '摘要',
-    content: 'Body', contentZh: '正文', publishedAt: '2026-08-30T02:00:00Z',
+    description: 'Description', summaryZh: '摘要',
+    content: 'Body', publishedAt: '2026-08-30T02:00:00Z',
     author: 'Author', ...overrides,
   };
 }
 
 function dayFile(day, overrides = {}) {
   return {
-    schemaVersion: 2, day, generatedAt: '2026-08-30T06:55:52Z',
+    schemaVersion: 3, day, generatedAt: '2026-08-30T06:55:52Z',
     x: [], podcasts: [], blogs: [], ...overrides,
   };
 }
@@ -49,48 +49,40 @@ test('itemKey enforces stable keys for all content kinds', () => {
   assert.throws(() => itemKey('blogs', {}), /缺少唯一键/);
 });
 
-test('dedupeItems merges complementary duplicates and preserves richer translations', () => {
+test('dedupeItems merges complementary duplicates and preserves the richer summary', () => {
   const result = dedupeItems('blogs', [
-    blog({ titleZh: '', summaryZh: '', contentZh: '', author: 'First author' }),
-    blog({ titleZh: '中文标题', summaryZh: '中文摘要', contentZh: '', author: '' }),
-    blog({ titleZh: '', summaryZh: '', contentZh: '完整中文正文', author: '' }),
+    blog({ summaryZh: '', author: 'First author' }),
+    blog({ summaryZh: '中文摘要', author: '' }),
   ]);
   assert.equal(result.items.length, 1);
-  assert.equal(result.duplicates, 2);
+  assert.equal(result.duplicates, 1);
   assert.deepEqual(
     {
-      titleZh: result.items[0].titleZh,
       summaryZh: result.items[0].summaryZh,
-      contentZh: result.items[0].contentZh,
       author: result.items[0].author,
     },
-    { titleZh: '中文标题', summaryZh: '中文摘要', contentZh: '完整中文正文', author: 'First author' },
+    { summaryZh: '中文摘要', author: 'First author' },
   );
 });
 
-test('validateDayFile rejects unsafe URLs and recent missing Chinese fields', () => {
+test('validateDayFile requires summaries and rejects removed translation fields', () => {
   const value = dayFile('2026-08-30', {
-    x: [tweet({ textZh: '', url: 'javascript:alert(1)' })],
-    blogs: [blog({ contentZh: '' })],
+    x: [tweet({ summaryZh: '', textZh: '旧译文', url: 'javascript:alert(1)' })],
+    blogs: [blog({ titleZh: '旧标题翻译', contentZh: '旧全文翻译' })],
   });
-  const result = validateDayFile(value, { now: NOW });
+  const result = validateDayFile(value, { now: NOW, requireAllSummaries: true });
+  assert.ok(result.errors.some(x => x.includes('summaryZh')));
   assert.ok(result.errors.some(x => x.includes('textZh')));
   assert.ok(result.errors.some(x => x.includes('http/https')));
+  assert.ok(result.errors.some(x => x.includes('titleZh')));
   assert.ok(result.errors.some(x => x.includes('contentZh')));
 });
 
-test('validateDayFile warns rather than fails for old missing translations', () => {
-  const value = dayFile('2026-08-20', { x: [tweet({ textZh: '' })] });
-  const result = validateDayFile(value, { now: NOW });
+test('validateDayFile can downgrade missing summaries during structural migration', () => {
+  const value = dayFile('2026-08-30', { x: [tweet({ summaryZh: '' })] });
+  const result = validateDayFile(value, { now: NOW, requireAllSummaries: false });
   assert.equal(result.errors.length, 0);
-  assert.ok(result.warnings.some(x => x.includes('textZh')));
-});
-
-test('validateDayFile can downgrade recent translation gaps during structural migration', () => {
-  const value = dayFile('2026-08-30', { x: [tweet({ textZh: '' })] });
-  const result = validateDayFile(value, { now: NOW, requireRecentTranslations: false });
-  assert.equal(result.errors.length, 0);
-  assert.ok(result.warnings.some(x => x.includes('textZh')));
+  assert.ok(result.warnings.some(x => x.includes('summaryZh')));
 });
 
 test('buildIndex sorts days newest first and records literal counts', () => {
@@ -99,7 +91,7 @@ test('buildIndex sorts days newest first and records literal counts', () => {
     ['2026-08-30', dayFile('2026-08-30', { x: [tweet()] })],
   ]);
   assert.deepEqual(buildIndex(files, '2026-08-30T07:00:00Z'), {
-    schemaVersion: 2,
+    schemaVersion: 3,
     generatedAt: '2026-08-30T07:00:00Z',
     days: [
       { day: '2026-08-30', path: 'data/days/2026-08-30.json', counts: { x: 1, podcasts: 0, blogs: 0 } },
