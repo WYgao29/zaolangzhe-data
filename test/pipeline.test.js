@@ -10,7 +10,12 @@ import {
   loadRepository,
   mergeIncoming,
 } from '../pipeline/storage.js';
-import { requireAIText } from '../pipeline/process.js';
+import {
+  processBlog,
+  processPodcast,
+  processTweet,
+  requireAIText,
+} from '../pipeline/process.js';
 
 const NOW = Date.parse('2026-08-30T12:00:00Z');
 
@@ -114,4 +119,37 @@ test('loadRepository migrates v2 shards in memory only when explicitly enabled',
 test('requireAIText rejects empty model output before state can advance', () => {
   assert.throws(() => requireAIText('   ', '推文总结'), /推文总结为空/);
   assert.equal(requireAIText('  有效内容  ', '推文总结'), '有效内容');
+});
+
+test('tweet processing stores a semantic summary instead of a translation', async () => {
+  const calls = [];
+  const item = { text: 'We shipped a faster model today.' };
+  await processTweet(item, async (messages) => {
+    calls.push(messages);
+    return '团队发布了速度更快的新模型。';
+  });
+  assert.equal(item.summaryZh, '团队发布了速度更快的新模型。');
+  assert.equal(item.textZh, undefined);
+  assert.match(calls[0][0].content, /总结/);
+  assert.match(calls[0][0].content, /不要逐句翻译/);
+});
+
+test('podcast processing keeps only the Chinese summary', async () => {
+  const item = { title: 'Episode', transcript: 'English transcript' };
+  await processPodcast(item, async () => '{"summaryZh":"本期讨论模型发布及其影响。"}');
+  assert.equal(item.summaryZh, '本期讨论模型发布及其影响。');
+  assert.equal(item.titleZh, undefined);
+});
+
+test('blog processing makes one summary request and never writes a full translation', async () => {
+  const calls = [];
+  const item = { title: 'Post', content: 'Long English body' };
+  await processBlog(item, async (messages) => {
+    calls.push(messages);
+    return '{"summaryZh":"文章概括了核心发布内容。"}';
+  });
+  assert.equal(item.summaryZh, '文章概括了核心发布内容。');
+  assert.equal(item.contentZh, undefined);
+  assert.equal(item.titleZh, undefined);
+  assert.equal(calls.length, 1);
 });
