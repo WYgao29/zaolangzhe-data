@@ -13,14 +13,14 @@ function repository({ badCount = false } = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'zaolangzhe-validate-'));
   const day = beijingDay(Date.now());
   const dayFile = {
-    schemaVersion: 2, day, generatedAt: new Date().toISOString(),
-    x: [{ id: 'one', handle: 'a', builder: 'A', bio: '', text: 'Hello', textZh: '你好', createdAt: new Date().toISOString(), url: 'https://x.com/a/status/one' }],
+    schemaVersion: 3, day, generatedAt: new Date().toISOString(),
+    x: [{ id: 'one', handle: 'a', builder: 'A', bio: '', text: 'Hello', summaryZh: '中文总结', createdAt: new Date().toISOString(), url: 'https://x.com/a/status/one' }],
     podcasts: [], blogs: [],
   };
   fs.mkdirSync(path.join(root, 'data', 'days'), { recursive: true });
   fs.writeFileSync(path.join(root, 'data', 'days', `${day}.json`), JSON.stringify(dayFile));
   fs.writeFileSync(path.join(root, 'data', 'index.json'), JSON.stringify({
-    schemaVersion: 2, generatedAt: dayFile.generatedAt,
+    schemaVersion: 3, generatedAt: dayFile.generatedAt,
     days: [{ day, path: `data/days/${day}.json`, counts: { x: badCount ? 2 : 1, podcasts: 0, blogs: 0 } }],
   }));
   return root;

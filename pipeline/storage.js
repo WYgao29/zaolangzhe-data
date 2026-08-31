@@ -8,6 +8,7 @@ import {
   mergeDuplicate,
   validateIndex,
 } from './contract.js';
+import { migrateDayFileToV3 } from './migrate-v3.js';
 
 const DAY = 86400000;
 const KINDS = ['x', 'podcasts', 'blogs'];
@@ -16,14 +17,24 @@ function readJSON(file) {
   return JSON.parse(fs.readFileSync(file, 'utf8'));
 }
 
-export function loadRepository(root, { now = Date.now(), requireRecentTranslations = true } = {}) {
+export function loadRepository(root, { migrateV2 = false, requireAllSummaries = true } = {}) {
   const indexPath = path.join(root, 'data', 'index.json');
-  const index = readJSON(indexPath);
+  let index = readJSON(indexPath);
   const dayFiles = new Map();
   for (const entry of index.days || []) dayFiles.set(entry.day, readJSON(path.join(root, entry.path)));
-  const validation = validateIndex(index, dayFiles, { now, requireRecentTranslations });
+  const migratedDays = new Set();
+  if (migrateV2 && index.schemaVersion === 2) {
+    for (const [day, file] of dayFiles) {
+      const migrated = migrateDayFileToV3(file);
+      dayFiles.set(day, migrated.file);
+      if (migrated.changed) migratedDays.add(day);
+    }
+    index = buildIndex(dayFiles, index.generatedAt);
+    requireAllSummaries = false;
+  }
+  const validation = validateIndex(index, dayFiles, { requireAllSummaries });
   if (validation.errors.length) throw new Error('数据仓校验失败:\n' + validation.errors.join('\n'));
-  return { index, dayFiles, warnings: validation.warnings };
+  return { index, dayFiles, warnings: validation.warnings, migratedDays };
 }
 
 export function atomicWriteJSON(file, value, validate = () => ({ errors: [] })) {
@@ -59,7 +70,7 @@ export function mergeIncoming(dayFiles, incoming) {
   const changedDays = new Set();
   let duplicates = 0;
   if (!dayFiles.has(incoming.day)) dayFiles.set(incoming.day, {
-    schemaVersion: 2,
+    schemaVersion: 3,
     day: incoming.day,
     generatedAt: incoming.generatedAt,
     x: [], podcasts: [], blogs: [],
@@ -90,26 +101,22 @@ export function mergeIncoming(dayFiles, incoming) {
   return { addedKeys, changedDays, duplicates };
 }
 
-function missingTranslation(kind, item) {
-  if (kind === 'x') return !String(item.textZh || '').trim();
-  if (kind === 'podcasts') return !String(item.titleZh || '').trim() || !String(item.summaryZh || '').trim();
-  return !String(item.titleZh || '').trim()
-    || !String(item.summaryZh || '').trim()
-    || (!!String(item.content || '').trim() && !String(item.contentZh || '').trim());
+function missingSummary(item) {
+  return !String(item.summaryZh || '').trim();
 }
 
-export function buildWorkQueue(dayFiles, { addedKeys = new Set(), now = Date.now() } = {}) {
+export function buildWorkQueue(dayFiles, { addedKeys = new Set(), now = Date.now(), includeAllMissing = false } = {}) {
   const cutoff = beijingDay(now - 2 * DAY);
   const work = [];
   let newCount = 0;
   let selfHealCount = 0;
   for (const [day, file] of dayFiles) {
-    if (day < cutoff) continue;
+    if (!includeAllMissing && day < cutoff) continue;
     for (const kind of KINDS) {
       for (const item of file[kind]) {
         const key = itemKey(kind, item);
         const isNew = addedKeys.has(key);
-        if (!isNew && !missingTranslation(kind, item)) continue;
+        if (!isNew && !missingSummary(item)) continue;
         work.push({ kind, key, day, item });
         if (isNew) newCount++;
         else selfHealCount++;
@@ -119,16 +126,16 @@ export function buildWorkQueue(dayFiles, { addedKeys = new Set(), now = Date.now
   return { work, newCount, selfHealCount };
 }
 
-export function writeRepository(root, dayFiles, generatedAt, changedDays = new Set(dayFiles.keys()), { now = Date.now(), requireRecentTranslations = true } = {}) {
+export function writeRepository(root, dayFiles, generatedAt, changedDays = new Set(dayFiles.keys()), { requireAllSummaries = true } = {}) {
   const index = buildIndex(dayFiles, generatedAt);
   for (const day of changedDays) {
     const file = dayFiles.get(day);
     atomicWriteJSON(path.join(root, 'data', 'days', `${day}.json`), file, (value) => {
       const files = new Map(dayFiles);
       files.set(day, value);
-      return validateIndex(buildIndex(files, generatedAt), files, { now, requireRecentTranslations });
+      return validateIndex(buildIndex(files, generatedAt), files, { requireAllSummaries });
     });
   }
-  atomicWriteJSON(path.join(root, 'data', 'index.json'), index, (value) => validateIndex(value, dayFiles, { now, requireRecentTranslations }));
+  atomicWriteJSON(path.join(root, 'data', 'index.json'), index, (value) => validateIndex(value, dayFiles, { requireAllSummaries }));
   return index;
 }
