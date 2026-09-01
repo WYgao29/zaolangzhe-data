@@ -18,6 +18,7 @@ const FEEDS = { x: 'feed-x.json', podcasts: 'feed-podcasts.json', blogs: 'feed-b
 const ZHIPU = 'https://open.bigmodel.cn/api/paas/v4';
 const MODEL = process.env.ZHIPU_MODEL || 'glm-5.3-flash';
 const KEY = process.env.ZHIPU_API_KEY || '';
+const AI_PROCESSING_ENABLED = false; // 暂停云端 AI；处理器与提示词全部保留。
 const CONCURRENCY = 2;
 const DAY = 86400000;
 
@@ -210,9 +211,12 @@ export async function main() {
   const queue = buildWorkQueue(repository.dayFiles, {
     addedKeys,
     includeAllMissing: repository.migratedDays.size > 0,
+    aiEnabled: AI_PROCESSING_ENABLED,
   });
   const work = queue.work.slice(0, LIMIT === Infinity ? undefined : LIMIT);
-  console.log(`待 AI 加工：新增 ${queue.newCount} · 自愈 ${queue.selfHealCount} · 重复 ${duplicateCount} · 本次 ${work.length}`);
+  console.log(AI_PROCESSING_ENABLED
+    ? `待 AI 加工：新增 ${queue.newCount} · 自愈 ${queue.selfHealCount} · 重复 ${duplicateCount} · 本次 ${work.length}`
+    : `纯英文模式：AI 总结已暂停 · 重复 ${duplicateCount}`);
   if (DRY_RUN) {
     console.log(`dry-run 结束：仓库警告 ${repository.warnings.length}，未调用 AI、未写文件。`);
     return;
@@ -240,9 +244,9 @@ export async function main() {
 
   const generatedAt = new Date().toISOString();
   const index = buildIndex(repository.dayFiles, generatedAt);
-  const finalValidation = validateIndex(index, repository.dayFiles);
+  const finalValidation = validateIndex(index, repository.dayFiles, { requireAllSummaries: false });
   if (finalValidation.errors.length) throw new Error('最终数据校验失败:\n' + finalValidation.errors.join('\n'));
-  writeRepository(ROOT, repository.dayFiles, generatedAt, changedDays);
+  writeRepository(ROOT, repository.dayFiles, generatedAt, changedDays, { requireAllSummaries: false });
   atomicWriteJSON(STATE_PATH, { upstreamSha: newestSha });
   await purge(['data/index.json', ...[...changedDays].map(day => `data/days/${day}.json`)]);
   console.log(`完成：成功 ${done}，失败 ${failed}，更新 ${changedDays.size} 天`);

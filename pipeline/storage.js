@@ -27,7 +27,7 @@ function validateIndexPathsForRead(index) {
   }
 }
 
-export function loadRepository(root, { migrateV2 = false, requireAllSummaries = true } = {}) {
+export function loadRepository(root, { migrateV2 = false, requireAllSummaries = false } = {}) {
   const indexPath = path.join(root, 'data', 'index.json');
   let index = readJSON(indexPath);
   if (migrateV2 && index.schemaVersion === 2) validateV2Index(index);
@@ -118,7 +118,11 @@ function missingSummary(item) {
   return !hasNonEmptyText(item.summaryZh);
 }
 
-export function buildWorkQueue(dayFiles, { addedKeys = new Set(), now = Date.now(), includeAllMissing = false } = {}) {
+export function buildWorkQueue(dayFiles, {
+  addedKeys = new Set(), now = Date.now(), includeAllMissing = false, aiEnabled = false,
+} = {}) {
+  // AI 总结暂停。原队列代码保留，未来恢复时显式传入 aiEnabled: true。
+  if (!aiEnabled) return { work: [], newCount: 0, selfHealCount: 0 };
   const cutoff = beijingDay(now - 2 * DAY);
   const work = [];
   let newCount = 0;
@@ -139,7 +143,7 @@ export function buildWorkQueue(dayFiles, { addedKeys = new Set(), now = Date.now
   return { work, newCount, selfHealCount };
 }
 
-export function writeRepository(root, dayFiles, generatedAt, changedDays = new Set(dayFiles.keys()), { requireAllSummaries = true } = {}) {
+export function writeRepository(root, dayFiles, generatedAt, changedDays = new Set(dayFiles.keys()), { requireAllSummaries = false } = {}) {
   const index = buildIndex(dayFiles, generatedAt);
   for (const day of changedDays) {
     const file = dayFiles.get(day);

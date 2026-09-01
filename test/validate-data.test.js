@@ -9,12 +9,12 @@ import { beijingDay } from '../pipeline/contract.js';
 
 const SCRIPT = path.resolve('scripts/validate-data.js');
 
-function repository({ badCount = false } = {}) {
+function repository({ badCount = false, summaryZh = '中文总结' } = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'zaolangzhe-validate-'));
   const day = beijingDay(Date.now());
   const dayFile = {
     schemaVersion: 3, day, generatedAt: new Date().toISOString(),
-    x: [{ id: 'one', handle: 'a', builder: 'A', bio: '', text: 'Hello', summaryZh: '中文总结', createdAt: new Date().toISOString(), url: 'https://x.com/a/status/one' }],
+    x: [{ id: 'one', handle: 'a', builder: 'A', bio: '', text: 'Hello', summaryZh, createdAt: new Date().toISOString(), url: 'https://x.com/a/status/one' }],
     podcasts: [], blogs: [],
   };
   fs.mkdirSync(path.join(root, 'data', 'days'), { recursive: true });
@@ -31,6 +31,15 @@ test('validate-data CLI exits zero and reports counts for a valid repository', (
   const result = spawnSync(process.execPath, [SCRIPT, '--root', root], { encoding: 'utf8' });
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /1 天 · 推文 1 · 播客 0 · 博客 0/);
+  fs.rmSync(root, { recursive: true, force: true });
+});
+
+test('validate-data accepts English-only items while AI is paused', () => {
+  const root = repository({ summaryZh: '' });
+  const result = spawnSync(process.execPath, [SCRIPT, '--root', root], { encoding: 'utf8' });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /缺少 summaryZh/);
+  assert.match(result.stdout, /警告 1/);
   fs.rmSync(root, { recursive: true, force: true });
 });
 
