@@ -16,6 +16,7 @@ import {
   processTweet,
   requireAIText,
 } from '../pipeline/process.js';
+import * as Process from '../pipeline/process.js';
 
 const NOW = Date.parse('2026-08-30T12:00:00Z');
 
@@ -62,7 +63,7 @@ test('buildWorkQueue includes new items and recent summary gaps exactly once', (
     ['2026-08-30', dayFile('2026-08-30', { x: [tweet('new', ''), tweet('missing', '')] })],
     ['2026-08-20', dayFile('2026-08-20', { x: [tweet('old-missing', '')] })],
   ]);
-  const result = buildWorkQueue(days, { addedKeys: new Set(['x:new']), now: NOW });
+  const result = buildWorkQueue(days, { addedKeys: new Set(['x:new']), now: NOW, aiEnabled: true });
   assert.deepEqual(result.work.map(x => x.key).sort(), ['x:missing', 'x:new']);
   assert.equal(result.newCount, 1);
   assert.equal(result.selfHealCount, 1);
@@ -72,7 +73,7 @@ test('buildWorkQueue does not spend AI tokens on a new item that already has a s
   const days = new Map([
     ['2026-08-30', dayFile('2026-08-30', { x: [tweet('already-summarized')] })],
   ]);
-  const result = buildWorkQueue(days, { addedKeys: new Set(['x:already-summarized']), now: NOW });
+  const result = buildWorkQueue(days, { addedKeys: new Set(['x:already-summarized']), now: NOW, aiEnabled: true });
   assert.equal(result.work.length, 0);
   assert.equal(result.newCount, 0);
 });
@@ -81,10 +82,36 @@ test('v3 migration queues old missing summaries when includeAllMissing is true',
   const files = new Map([
     ['2026-01-01', dayFile('2026-01-01', { x: [tweet('old', '')] })],
   ]);
-  const normal = buildWorkQueue(files, { now: NOW, includeAllMissing: false });
-  const migration = buildWorkQueue(files, { now: NOW, includeAllMissing: true });
+  const normal = buildWorkQueue(files, { now: NOW, includeAllMissing: false, aiEnabled: true });
+  const migration = buildWorkQueue(files, { now: NOW, includeAllMissing: true, aiEnabled: true });
   assert.equal(normal.work.length, 0);
   assert.deepEqual(migration.work.map(entry => entry.key), ['x:old']);
+});
+
+test('buildWorkQueue leaves missing summaries untouched when AI is paused', () => {
+  const days = new Map([
+    ['2026-08-30', dayFile('2026-08-30', { x: [tweet('english-only', '')] })],
+  ]);
+  const result = buildWorkQueue(days, { addedKeys: new Set(['x:english-only']), now: NOW });
+  assert.deepEqual(result, { work: [], newCount: 0, selfHealCount: 0 });
+  assert.equal(days.get('2026-08-30').x[0].text, 'tweet english-only');
+  assert.equal(days.get('2026-08-30').x[0].summaryZh, '');
+});
+
+test('AI restore mode is explicit, strict, and can include the full missing backlog', () => {
+  assert.deepEqual(Process.resolveAIMode([], {}), {
+    enabled: false,
+    includeAllMissing: false,
+    requireAllSummaries: false,
+  });
+  assert.deepEqual(Process.resolveAIMode(
+    ['--include-all-missing'],
+    { AI_PROCESSING_ENABLED: 'true' },
+  ), {
+    enabled: true,
+    includeAllMissing: true,
+    requireAllSummaries: true,
+  });
 });
 
 test('atomicWriteJSON keeps the previous file when validation rejects the replacement', () => {

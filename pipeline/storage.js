@@ -118,7 +118,11 @@ function missingSummary(item) {
   return !hasNonEmptyText(item.summaryZh);
 }
 
-export function buildWorkQueue(dayFiles, { addedKeys = new Set(), now = Date.now(), includeAllMissing = false } = {}) {
+export function buildWorkQueue(dayFiles, {
+  addedKeys = new Set(), now = Date.now(), includeAllMissing = false, aiEnabled = false,
+} = {}) {
+  // AI 总结暂停。原队列代码保留，未来恢复时显式传入 aiEnabled: true。
+  if (!aiEnabled) return { work: [], newCount: 0, selfHealCount: 0 };
   const cutoff = beijingDay(now - 2 * DAY);
   const work = [];
   let newCount = 0;

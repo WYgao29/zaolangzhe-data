@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       backfill_days:
-        description: '补总结最近 N 天（0 = 只处理上游最新快照；v2 首次升级会自动补齐全部历史总结）'
+        description: '回溯最近 N 天的上游英文快照（0 = 只处理最新快照）'
         default: '0'
 
 permissions:
@@ -32,8 +32,6 @@ jobs:
         run: npm test
 
       - name: 运行数据管线
-        env:
-          ZHIPU_API_KEY: ${{ secrets.ZHIPU_API_KEY }}
         run: node pipeline/process.js --backfill-days "${{ github.event.inputs.backfill_days || '0' }}"
 
       - name: 校验数据契约
