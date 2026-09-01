@@ -53,6 +53,17 @@ npm run dry-run
 
 `dry-run` 会读取并合并上游快照，但不会写数据或状态。正常管线不需要任何 AI API Key。
 
+## 恢复 AI 加工
+
+AI 处理代码没有删除。未来换成可用的云端或本地 OpenAI 兼容接口后，先在本地执行全量补缺：
+
+```bash
+AI_PROCESSING_ENABLED=true ZHIPU_API_KEY=可用密钥 \
+  node pipeline/process.js --include-all-missing
+```
+
+AI 模式会自动恢复“所有条目必须有 `summaryZh`”的严格校验；任何历史缺口未填完时都不会发布。全量补缺通过后，再把 `AI_PROCESSING_ENABLED=true` 和对应密钥注入 Actions；本次纯英文版本不注入这两项。
+
 旧 v1 聚合格式已停止支持。当前 v2 到 v3 的转换由正式管线在内存中自动完成，无需单独运行迁移脚本或本地写数据。
 
 ```bash

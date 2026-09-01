@@ -27,7 +27,7 @@ function validateIndexPathsForRead(index) {
   }
 }
 
-export function loadRepository(root, { migrateV2 = false, requireAllSummaries = false } = {}) {
+export function loadRepository(root, { migrateV2 = false, requireAllSummaries = true } = {}) {
   const indexPath = path.join(root, 'data', 'index.json');
   let index = readJSON(indexPath);
   if (migrateV2 && index.schemaVersion === 2) validateV2Index(index);
@@ -143,7 +143,7 @@ export function buildWorkQueue(dayFiles, {
   return { work, newCount, selfHealCount };
 }
 
-export function writeRepository(root, dayFiles, generatedAt, changedDays = new Set(dayFiles.keys()), { requireAllSummaries = false } = {}) {
+export function writeRepository(root, dayFiles, generatedAt, changedDays = new Set(dayFiles.keys()), { requireAllSummaries = true } = {}) {
   const index = buildIndex(dayFiles, generatedAt);
   for (const day of changedDays) {
     const file = dayFiles.get(day);

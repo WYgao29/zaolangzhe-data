@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-/* 造浪者 v3 数据管线：抓上游 feed → 智谱总结 → 按北京时间批次日原子写入日分片。 */
+/* 造浪者 v3 数据管线：抓上游 feed → 可选 AI 总结 → 按北京时间批次日原子写入日分片。 */
 'use strict';
 
 import fs from 'node:fs';
@@ -18,11 +18,19 @@ const FEEDS = { x: 'feed-x.json', podcasts: 'feed-podcasts.json', blogs: 'feed-b
 const ZHIPU = 'https://open.bigmodel.cn/api/paas/v4';
 const MODEL = process.env.ZHIPU_MODEL || 'glm-5.3-flash';
 const KEY = process.env.ZHIPU_API_KEY || '';
-const AI_PROCESSING_ENABLED = false; // 暂停云端 AI；处理器与提示词全部保留。
 const CONCURRENCY = 2;
 const DAY = 86400000;
 
 const args = process.argv.slice(2);
+export function resolveAIMode(runtimeArgs = [], env = {}) {
+  const enabled = String(env.AI_PROCESSING_ENABLED || '').toLowerCase() === 'true';
+  return {
+    enabled,
+    includeAllMissing: enabled && runtimeArgs.includes('--include-all-missing'),
+    requireAllSummaries: enabled,
+  };
+}
+const AI_MODE = resolveAIMode(args, process.env); // Actions 不设置开关，默认纯英文。
 const getArg = (name) => {
   const index = args.indexOf('--' + name);
   if (index === -1) return undefined;
@@ -176,7 +184,7 @@ async function purge(paths) {
 }
 
 export async function main() {
-  console.log(`造浪者 v3 管线 · 模型 ${MODEL} · 补总结 ${BACKFILL_DAYS} 天 · ${DRY_RUN ? 'DRY-RUN' : '正式'}`);
+  console.log(`造浪者 v3 管线 · ${AI_MODE.enabled ? `AI ${MODEL}` : '纯英文'} · 回溯上游 ${BACKFILL_DAYS} 天 · ${DRY_RUN ? 'DRY-RUN' : '正式'}`);
   const repository = loadRepository(ROOT, { migrateV2: true, requireAllSummaries: false });
   const state = readState();
   const snapshots = await collectSnapshots();
@@ -210,11 +218,11 @@ export async function main() {
 
   const queue = buildWorkQueue(repository.dayFiles, {
     addedKeys,
-    includeAllMissing: repository.migratedDays.size > 0,
-    aiEnabled: AI_PROCESSING_ENABLED,
+    includeAllMissing: repository.migratedDays.size > 0 || AI_MODE.includeAllMissing,
+    aiEnabled: AI_MODE.enabled,
   });
   const work = queue.work.slice(0, LIMIT === Infinity ? undefined : LIMIT);
-  console.log(AI_PROCESSING_ENABLED
+  console.log(AI_MODE.enabled
     ? `待 AI 加工：新增 ${queue.newCount} · 自愈 ${queue.selfHealCount} · 重复 ${duplicateCount} · 本次 ${work.length}`
     : `纯英文模式：AI 总结已暂停 · 重复 ${duplicateCount}`);
   if (DRY_RUN) {
@@ -244,9 +252,13 @@ export async function main() {
 
   const generatedAt = new Date().toISOString();
   const index = buildIndex(repository.dayFiles, generatedAt);
-  const finalValidation = validateIndex(index, repository.dayFiles, { requireAllSummaries: false });
+  const finalValidation = validateIndex(index, repository.dayFiles, {
+    requireAllSummaries: AI_MODE.requireAllSummaries,
+  });
   if (finalValidation.errors.length) throw new Error('最终数据校验失败:\n' + finalValidation.errors.join('\n'));
-  writeRepository(ROOT, repository.dayFiles, generatedAt, changedDays, { requireAllSummaries: false });
+  writeRepository(ROOT, repository.dayFiles, generatedAt, changedDays, {
+    requireAllSummaries: AI_MODE.requireAllSummaries,
+  });
   atomicWriteJSON(STATE_PATH, { upstreamSha: newestSha });
   await purge(['data/index.json', ...[...changedDays].map(day => `data/days/${day}.json`)]);
   console.log(`完成：成功 ${done}，失败 ${failed}，更新 ${changedDays.size} 天`);

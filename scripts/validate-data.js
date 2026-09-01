@@ -14,7 +14,7 @@ const scriptDirectory = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(option('--root') || path.join(scriptDirectory, '..'));
 
 try {
-  const { index, warnings } = loadRepository(root);
+  const { index, warnings } = loadRepository(root, { requireAllSummaries: false });
   const counts = index.days.reduce((total, entry) => ({
     x: total.x + entry.counts.x,
     podcasts: total.podcasts + entry.counts.podcasts,

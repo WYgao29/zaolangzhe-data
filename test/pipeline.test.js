@@ -16,6 +16,7 @@ import {
   processTweet,
   requireAIText,
 } from '../pipeline/process.js';
+import * as Process from '../pipeline/process.js';
 
 const NOW = Date.parse('2026-08-30T12:00:00Z');
 
@@ -95,6 +96,22 @@ test('buildWorkQueue leaves missing summaries untouched when AI is paused', () =
   assert.deepEqual(result, { work: [], newCount: 0, selfHealCount: 0 });
   assert.equal(days.get('2026-08-30').x[0].text, 'tweet english-only');
   assert.equal(days.get('2026-08-30').x[0].summaryZh, '');
+});
+
+test('AI restore mode is explicit, strict, and can include the full missing backlog', () => {
+  assert.deepEqual(Process.resolveAIMode([], {}), {
+    enabled: false,
+    includeAllMissing: false,
+    requireAllSummaries: false,
+  });
+  assert.deepEqual(Process.resolveAIMode(
+    ['--include-all-missing'],
+    { AI_PROCESSING_ENABLED: 'true' },
+  ), {
+    enabled: true,
+    includeAllMissing: true,
+    requireAllSummaries: true,
+  });
 });
 
 test('atomicWriteJSON keeps the previous file when validation rejects the replacement', () => {
