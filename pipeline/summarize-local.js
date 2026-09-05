@@ -92,7 +92,13 @@ export async function pushWithRetry(root, { attempts = 3, log = console.log } = 
 }
 
 export async function main(runtimeArgs = args) {
+  // fail-fast：本工具面向本地端点。未显式设置 AI_PROVIDER 时会默认落到 zhipu
+  // 云端（通常没有密钥），725 条逐个 401 白跑——必须在动任何数据前拒绝。
+  if (!process.env.AI_PROVIDER) {
+    throw new Error('summarize-local 需要本地端点配置：请通过 local/env（AI_PROVIDER=openai）或环境变量提供；云端补缺请改用 pipeline/process.js');
+  }
   const AI_CONFIG = resolveAIConfig(process.env);
+  if (AI_CONFIG.needsKey && !AI_CONFIG.apiKey) throw new Error('缺少 AI_API_KEY');
   const dryRun = runtimeArgs.includes('--dry-run');
   console.log(`本地中文总结 · ${AI_CONFIG.provider}:${AI_CONFIG.model} · 最近 ${RECENT_DAYS} 天${INCLUDE_ALL ? ' · 全量补漏' : ''}${dryRun ? ' · DRY-RUN' : ''}`);
 
