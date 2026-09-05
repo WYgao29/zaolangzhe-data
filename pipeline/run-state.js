@@ -29,3 +29,12 @@ export function createRunStateRecorder(statePath, { now = () => new Date() } = {
     },
   };
 }
+
+/* 防重入判断：running 且状态文件在 maxAgeMs 内更新过 → 视为有任务活跃。
+ * 长时间无更新（进程被杀等）视为僵尸状态，放行新任务避免永久锁死。 */
+export function isRunActive(state, now = Date.now(), maxAgeMs = 6 * 60 * 60 * 1000) {
+  if (!state?.running) return false;
+  const updated = Date.parse(state.updatedAt || '');
+  if (!Number.isFinite(updated)) return false;
+  return now - updated < maxAgeMs;
+}

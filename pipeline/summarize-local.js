@@ -13,7 +13,7 @@ import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 
 import { beijingDay, buildIndex, validateIndex } from './contract.js';
-import { createRunStateRecorder } from './run-state.js';
+import { createRunStateRecorder, isRunActive } from './run-state.js';
 import {
   archiveUpstreamSnapshots,
   createAIClient,
@@ -64,6 +64,13 @@ export function computeBackfillDays(newestDay, now = Date.now()) {
   const to = Date.parse(`${today}T00:00:00Z`);
   if (!Number.isFinite(from) || !Number.isFinite(to)) return 0;
   return Math.max(0, Math.round((to - from) / DAY));
+}
+
+/* 单次归档回放封顶：防止 Mac 长期关机后一次回放几百天导致任务跑上一整天。
+ * 超出的缺口由后续每小时的运行分批追赶（每轮最多 14 天）。 */
+export const MAX_REPLAY_DAYS = 14;
+export function capReplayDays(gapDays, max = MAX_REPLAY_DAYS) {
+  return Math.max(0, Math.min(Math.round(gapDays) || 0, max));
 }
 
 /* 核心循环：依赖全部注入，便于测试。
@@ -160,7 +167,14 @@ export async function main(runtimeArgs = args) {
   console.log(`造浪者本地任务 · ${AI_CONFIG.provider}:${AI_CONFIG.model} · 最近 ${RECENT_DAYS} 天${INCLUDE_ALL ? ' · 全量补漏' : ''}${dryRun ? ' · DRY-RUN' : ''}`);
 
   const startedAt = new Date().toISOString();
-  const recorder = createRunStateRecorder(path.join(ROOT, 'local', 'run-state.json'));
+  const statePath = path.join(ROOT, 'local', 'run-state.json');
+  // 防重入：先读已有状态再置位——已有任务活跃时跳过本次（dry-run 预览不受限）
+  const existing = fs.existsSync(statePath) ? JSON.parse(fs.readFileSync(statePath, 'utf8')) : null;
+  if (!dryRun && isRunActive(existing)) {
+    console.log(`已有任务在运行（阶段 ${existing.phase}，更新于 ${existing.updatedAt}），本次跳过`);
+    return { processed: 0, failed: 0, published: false, skipped: true };
+  }
+  const recorder = createRunStateRecorder(statePath);
   recorder.record({
     running: true, phase: 'pull', trigger: TRIGGER,
     model: `${AI_CONFIG.provider}:${AI_CONFIG.model}`, startedAt, dryRun,

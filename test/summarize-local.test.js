@@ -1,7 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { computeBackfillDays, runSummarizer } from '../pipeline/summarize-local.js';
+import { capReplayDays, computeBackfillDays, runSummarizer } from '../pipeline/summarize-local.js';
+import { isRunActive } from '../pipeline/run-state.js';
 import { buildWorkQueue } from '../pipeline/storage.js';
 
 function dayFile(day, items) {
@@ -150,4 +151,24 @@ test('buildWorkQueue honours the recentDays window', () => {
   assert.deepEqual(recent7.work.map(entry => entry.key).sort(), ['x:mid', 'x:new']);
   const all = buildWorkQueue(dayFiles, { now, aiEnabled: true, includeAllMissing: true });
   assert.equal(all.work.length, 3);
+});
+
+test('capReplayDays bounds a single replay to 14 days and never goes negative', () => {
+  assert.equal(capReplayDays(3), 3);
+  assert.equal(capReplayDays(0), 0);
+  assert.equal(capReplayDays(14), 14);
+  assert.equal(capReplayDays(15), 14, '超过 14 天按 14 天封顶，剩余分批追赶');
+  assert.equal(capReplayDays(300), 14);
+  assert.equal(capReplayDays(-5), 0);
+});
+
+test('isRunActive treats a fresh running state as active, a stale one as inactive', () => {
+  const now = Date.parse('2026-09-05T20:00:00Z');
+  const fresh = { running: true, updatedAt: '2026-09-05T19:30:00Z' };
+  const stale = { running: true, updatedAt: '2026-09-05T10:00:00Z' };
+  assert.equal(isRunActive(fresh, now), true, '30 分钟前还在运行 → 视为活跃，跳过新任务');
+  assert.equal(isRunActive(stale, now), false, '10 小时无更新 → 视为僵尸状态，放行新任务');
+  assert.equal(isRunActive({ running: false }, now), false);
+  assert.equal(isRunActive(null, now), false);
+  assert.equal(isRunActive(undefined, now), false);
 });
