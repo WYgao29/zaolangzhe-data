@@ -257,6 +257,80 @@ test('archiveUpstreamSnapshots replays historical snapshots and merges upstream 
   assert.equal(day.schemaVersion, 3);
 });
 
+test('splitIntoChunks splits long text at paragraph boundaries with a hard cap', async () => {
+  const { splitIntoChunks } = await import('../pipeline/process.js');
+
+  assert.deepEqual(splitIntoChunks('短文本'), ['短文本'], '不超限不分段');
+  assert.equal(splitIntoChunks('').length, 1);
+
+  // 带换行的长文本：优先在换行处切，每段不超上限
+  const withNewlines = Array.from({ length: 8 }, (_, i) => `第${i}段\n${'x'.repeat(20000)}`).join('\n');
+  const chunks = splitIntoChunks(withNewlines);
+  assert.equal(chunks.join('').replace(/\n/g, '').length, withNewlines.replace(/\n/g, '').length, '内容不丢失');
+  for (const chunk of chunks) assert.ok(chunk.length <= 60000, `每段 ${chunk.length} 应 ≤ 60000`);
+
+  // 无换行的超长文本：硬切
+  const noNewline = 'y'.repeat(150000);
+  const hard = splitIntoChunks(noNewline);
+  assert.equal(hard.length, 3);
+  assert.equal(hard.join('').length, 150000, '硬切不丢字符');
+
+  // 超过段数上限：明确报错而非静默丢弃
+  const huge = 'z'.repeat(60000 * 25 + 1);
+  assert.throws(() => splitIntoChunks(huge), /超过.*段上限/);
+});
+
+test('processPodcast segments oversized transcripts instead of truncating', async () => {
+  // 130000 字符转录（旧逻辑会在 60000 处截断丢内容）→ 应分 3 段 map + 1 次 reduce
+  const part = 'Episode discussion point with details. '.repeat(3400); // ~130k
+  const item = { title: 'Long Episode', transcript: part };
+  const calls = [];
+  const aiCall = async (messages) => {
+    calls.push(messages);
+    if (calls.length <= 3) return `第${calls.length}段要点：讨论了 AI 安全话题。`;
+    return '{"summaryZh":"整合后的完整中文总结。"}';
+  };
+  await processPodcast(item, aiCall);
+
+  assert.equal(calls.length, 4, '3 次分段 + 1 次汇总');
+  const joined = calls.slice(0, 3).map(c => c[1].content).join('');
+  assert.ok(joined.includes(part.slice(0, 1000)), '分段请求应覆盖转录开头');
+  assert.ok(joined.includes(part.slice(-1000)), '分段请求应覆盖转录结尾（不再截断丢弃）');
+  assert.match(calls[3][0].content, /整合|要点/);
+  assert.equal(item.summaryZh, '整合后的完整中文总结。');
+});
+
+test('processBlog segments oversized articles instead of truncating', async () => {
+  const content = 'Long-form article paragraph. '.repeat(5000); // ~145k
+  const item = { title: 'Long Post', content };
+  const calls = [];
+  const aiCall = async (messages) => {
+    calls.push(messages);
+    if (calls.length <= 3) return `第${calls.length}段要点：核心结论。`;
+    return '{"summaryZh":"整合后的文章总结。"}';
+  };
+  await processBlog(item, aiCall);
+  assert.equal(calls.length, 4);
+  const joined = calls.slice(0, 3).map(c => c[1].content).join('');
+  assert.ok(joined.includes(content.slice(-1000)), '文章结尾不再被截断');
+  assert.equal(item.summaryZh, '整合后的文章总结。');
+});
+
+test('processTweet segments rare oversized long-form posts', async () => {
+  const text = 'Long-form X post. '.repeat(9000); // ~162k → 3 段
+  const item = { text };
+  const calls = [];
+  const aiCall = async (messages) => {
+    calls.push(messages);
+    if (calls.length <= 3) return `第${calls.length}段要点。`;
+    return '整合后的长文推文总结。';
+  };
+  await processTweet(item, aiCall);
+  assert.equal(calls.length, 4);
+  assert.equal(item.summaryZh, '整合后的长文推文总结。');
+  assert.doesNotMatch(item.summaryZh, /^\{/, '长文推文汇总走纯文本而非 JSON');
+});
+
 test('requireAIText rejects empty model output before state can advance', () => {
   assert.throws(() => requireAIText('   ', '推文总结'), /推文总结为空/);
   assert.throws(() => requireAIText({ value: '伪总结' }, '推文总结'), /推文总结为空/);

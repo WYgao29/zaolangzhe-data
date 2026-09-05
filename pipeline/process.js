@@ -39,7 +39,6 @@ const LIMIT = Number.isFinite(parsedLimit) && parsedLimit >= 0 ? parsedLimit : I
 const DRY_RUN = args.includes('--dry-run');
 
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
-const cap = (value, limit) => String(value || '').slice(0, limit);
 
 export function requireAIText(value, label) {
   if (!hasNonEmptyText(value)) throw new Error(`${label}为空`);
@@ -151,7 +150,75 @@ function parseJSONLoose(text) {
   return JSON.parse(cleaned.slice(start, end + 1));
 }
 
+/* ---------- 超长内容分段总结（map → reduce） ----------
+ * 三类内容都可能遇到超长文本：先识别长度——单请求预算内直接总结；
+ * 超出则按段落边界切段，逐段提取中文要点（map），最后整合成最终总结（reduce）。
+ * 不再截断丢弃任何内容。段数有硬上限（超过视为异常数据，明确失败而非死循环）。 */
+const CHUNK_CHARS = 60000; // 单请求安全预算：实测 6.6 万字符 ≈ 1.5 万 token，远低于 3.2 万上下文上限
+const MAX_CHUNKS = 24;     // 超过约 144 万字符视为异常数据
+
+export function splitIntoChunks(text, maxChars = CHUNK_CHARS, maxChunks = MAX_CHUNKS) {
+  const full = String(text || '');
+  if (full.length <= maxChars) return [full];
+  const chunks = [];
+  let rest = full;
+  while (rest.length > maxChars) {
+    let cut = rest.lastIndexOf('\n', maxChars);
+    if (cut < maxChars / 2) cut = maxChars; // 无换行或换行太靠前时硬切
+    chunks.push(rest.slice(0, cut));
+    rest = rest.slice(cut).replace(/^\n+/, '');
+  }
+  if (rest.length) chunks.push(rest);
+  if (chunks.length > maxChunks) throw new Error(`内容超长：${full.length} 字符超过 ${maxChunks} 段上限，请人工检查`);
+  return chunks;
+}
+
+const CHUNK_PROMPTS = {
+  x: {
+    map: '你是科技资讯编辑。以下是一条长推文的一段节选，用简体中文提取该段的关键信息要点，1–3 句；保留关键人物、产品名、数字和结论。',
+    reduce: '你是科技资讯编辑。以下是同一条长推文各段的中文要点，请整合成一条简体中文总结，通常 1–2 句、约 80 个中文字符以内；保留关键人物、产品名、数字和结论；只输出总结，不要解释或加引号。',
+    reduceJSON: false,
+  },
+  podcasts: {
+    map: '你是科技播客编辑。以下是同一期播客转录文本的一段节选，用简体中文提取该段的关键要点（嘉宾观点、事实、结论、数字），简明输出。',
+    reduce: '你是科技播客编辑。以下是同一期播客各段的要点，请整合成约 400 字中文要点总结，包含嘉宾、主题和 3–5 条核心观点。直接输出 JSON：{"summaryZh":"…"}。',
+    reduceJSON: true,
+  },
+  blogs: {
+    map: '你是科技文章编辑。以下是同一篇文章的一段节选，用简体中文概括该段的核心事实和结论，1–3 句。',
+    reduce: '你是科技文章编辑。以下是同一篇文章各段的要点，请整合成 2–3 句简体中文内容总结；概括核心事实和结论，不要逐段翻译。直接输出 JSON：{"summaryZh":"…"}。',
+    reduceJSON: true,
+  },
+};
+
+async function summarizeLongText(kind, text, aiCall, label) {
+  const chunks = splitIntoChunks(text);
+  if (chunks.length === 1) return null; // 单请求路径由调用方处理
+  const prompts = CHUNK_PROMPTS[kind];
+  const partials = [];
+  for (let i = 0; i < chunks.length; i++) {
+    partials.push(requireAIText(await aiCall([
+      { role: 'system', content: prompts.map },
+      { role: 'user', content: `（第 ${i + 1}/${chunks.length} 段）\n${chunks[i]}` },
+    ]), `${label}分段要点 ${i + 1}`));
+  }
+  const reduceUser = partials.map((part, i) => `【第 ${i + 1} 段要点】\n${part}`).join('\n\n');
+  if (prompts.reduceJSON) {
+    const parsed = parseJSONLoose(await aiCall([
+      { role: 'system', content: prompts.reduce },
+      { role: 'user', content: reduceUser },
+    ]));
+    return requireAIText(parsed.summaryZh, label);
+  }
+  return requireAIText(await aiCall([
+    { role: 'system', content: prompts.reduce },
+    { role: 'user', content: reduceUser },
+  ]), label);
+}
+
 export async function processTweet(item, aiCall = ai) {
+  const long = await summarizeLongText('x', item.text, aiCall, '推文总结');
+  if (long !== null) { item.summaryZh = long; return; }
   item.summaryZh = requireAIText(await aiCall([
     { role: 'system', content: '你是科技资讯编辑。用简体中文总结英文推文的核心信息，通常 1–2 句、约 80 个中文字符以内；保留关键人物、产品名、数字和结论；忽略非关键链接、@提及和话题标签；不要逐句翻译，不要解释或加引号，只输出总结。若推文只有链接没有正文，输出"分享了一条链接，未附文字说明。"' },
     { role: 'user', content: item.text },
@@ -159,18 +226,22 @@ export async function processTweet(item, aiCall = ai) {
 }
 
 export async function processPodcast(item, aiCall = ai) {
+  const long = await summarizeLongText('podcasts', item.transcript, aiCall, '播客摘要');
+  if (long !== null) { item.summaryZh = long; return; }
   const parsed = parseJSONLoose(await aiCall([
     { role: 'system', content: '你是科技播客编辑。直接输出 JSON：{"summaryZh":"约 400 字中文要点总结，包含嘉宾、主题和 3–5 条核心观点"}' },
-    { role: 'user', content: `标题: ${item.title}\n转录文本:\n${cap(item.transcript, 60000)}` },
+    { role: 'user', content: `标题: ${item.title}\n转录文本:\n${item.transcript}` },
   ]));
   item.summaryZh = requireAIText(parsed.summaryZh, '播客摘要');
 }
 
 export async function processBlog(item, aiCall = ai) {
   if (hasNonEmptyText(item.summaryZh)) return;
+  const long = await summarizeLongText('blogs', item.content, aiCall, '博客摘要');
+  if (long !== null) { item.summaryZh = long; return; }
   const parsed = parseJSONLoose(await aiCall([
     { role: 'system', content: '你是科技文章编辑。直接输出 JSON：{"summaryZh":"2–3 句简体中文内容总结"}；概括核心事实和结论，不要逐段翻译。' },
-    { role: 'user', content: `标题: ${item.title}\n正文:\n${cap(item.content, 6000)}` },
+    { role: 'user', content: `标题: ${item.title}\n正文:\n${item.content}` },
   ]));
   item.summaryZh = requireAIText(parsed.summaryZh, '博客摘要');
 }
