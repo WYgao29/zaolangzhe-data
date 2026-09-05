@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { runSummarizer } from '../pipeline/summarize-local.js';
+import { computeBackfillDays, runSummarizer } from '../pipeline/summarize-local.js';
 import { buildWorkQueue } from '../pipeline/storage.js';
 
 function dayFile(day, items) {
@@ -13,57 +13,78 @@ function workEntry(day, key) {
 }
 
 function makeDeps(overrides = {}) {
-  const calls = { pull: 0, load: 0, summarize: [], checkpoint: [], publish: 0, log: [] };
-  const repository = { dayFiles: new Map([['2026-09-04', dayFile('2026-09-04', [])]]) };
+  const calls = { pull: 0, load: 0, archive: 0, summarize: [], checkpoint: [], publish: 0, log: [] };
+  const repository = { index: { days: [{ day: '2026-09-04' }] }, dayFiles: new Map([['2026-09-04', dayFile('2026-09-04', [])]]) };
   const deps = {
     pull: async () => { calls.pull++; },
     loadRepo: async () => { calls.load++; return repository; },
+    archive: async () => { calls.archive++; return { addedKeys: new Set(), changedDays: new Set(), duplicates: 0, fetched: 1 }; },
     buildQueue: () => ({ work: [workEntry('2026-09-04', 'a'), workEntry('2026-09-04', 'b')], newCount: 2, selfHealCount: 0 }),
     summarize: async (entry) => { calls.summarize.push(entry.key); entry.item.summaryZh = `总结 ${entry.key}`; },
-    checkpoint: async (repo, day) => { calls.checkpoint.push(day); },
+    checkpoint: async (repo, days) => { calls.checkpoint.push([...days]); },
     validateAll: () => ({ errors: [] }),
-    publish: async () => { calls.publish++; },
+    publish: async ({ changedDays }) => { calls.publish++; calls.publishDays = [...changedDays]; },
     log: (msg) => calls.log.push(msg),
     ...overrides,
   };
   return { deps, calls, repository };
 }
 
-test('runSummarizer pulls first, summarizes each item, checkpoints per item, publishes once', async () => {
+test('runSummarizer archives after load, checkpoints archive days, then summarizes and publishes once', async () => {
   const order = [];
   const { deps, calls } = makeDeps({
     pull: async () => { order.push('pull'); },
+    loadRepo: async () => { order.push('load'); return { index: { days: [] }, dayFiles: new Map() }; },
+    archive: async () => { order.push('archive'); return { addedKeys: new Set(['x:new']), changedDays: new Set(['2026-09-05']), duplicates: 2, fetched: 1 }; },
+    buildQueue: () => { order.push('queue'); return { work: [workEntry('2026-09-04', 'a')], newCount: 1, selfHealCount: 0 }; },
     summarize: async (entry) => { order.push(`summarize:${entry.key}`); entry.item.summaryZh = 'ok'; },
-    checkpoint: async (repo, day) => { order.push(`checkpoint:${day}`); calls.checkpoint.push(day); },
+    checkpoint: async (repo, days) => { order.push(`checkpoint:${[...days].join(',')}`); calls.checkpoint.push([...days]); },
     publish: async ({ changedDays }) => { order.push('publish'); calls.publish++; calls.publishDays = [...changedDays]; },
   });
   const result = await runSummarizer(deps);
 
-  assert.deepEqual(order, ['pull', 'summarize:x:a', 'checkpoint:2026-09-04', 'summarize:x:b', 'checkpoint:2026-09-04', 'publish']);
+  assert.deepEqual(order, [
+    'pull', 'load', 'archive', 'checkpoint:2026-09-05', 'queue',
+    'summarize:x:a', 'checkpoint:2026-09-04', 'publish',
+  ]);
   assert.equal(calls.publish, 1);
-  assert.deepEqual(result, { processed: 2, failed: 0, published: true });
+  assert.deepEqual(result, { processed: 1, failed: 0, published: true });
 });
 
-test('runSummarizer exits without publishing when the queue is empty', async () => {
+test('runSummarizer publishes archive-only changes when the queue is empty', async () => {
+  const { deps, calls } = makeDeps({
+    buildQueue: () => ({ work: [], newCount: 0, selfHealCount: 0 }),
+    archive: async () => ({ addedKeys: new Set(['x:n1', 'x:n2']), changedDays: new Set(['2026-09-05']), duplicates: 0, fetched: 1 }),
+  });
+  const result = await runSummarizer(deps);
+  assert.deepEqual(calls.summarize, []);
+  assert.deepEqual(calls.checkpoint.at(-1), ['2026-09-05']);
+  assert.equal(calls.publish, 1, '纯归档变更也必须发布');
+  assert.equal(result.processed, 0);
+  assert.equal(result.published, true);
+});
+
+test('runSummarizer skips publishing when nothing changed at all', async () => {
   const { deps, calls } = makeDeps({
     buildQueue: () => ({ work: [], newCount: 0, selfHealCount: 0 }),
   });
   const result = await runSummarizer(deps);
-  assert.deepEqual(calls.summarize, []);
   assert.equal(calls.publish, 0);
   assert.deepEqual(result, { processed: 0, failed: 0, published: false });
 });
 
-test('runSummarizer continues past a failed item but refuses to publish', async () => {
+test('runSummarizer keeps publishing when AI items fail — summaries retry next run', async () => {
   const { deps, calls } = makeDeps({
     summarize: async (entry) => {
       if (entry.key === 'x:a') throw new Error('端点不可用');
       calls.summarize.push(entry.key);
     },
   });
-  await assert.rejects(() => runSummarizer(deps), /1 条总结失败/);
+  const result = await runSummarizer(deps);
   assert.deepEqual(calls.summarize, ['x:b'], '失败后继续处理剩余条目');
-  assert.equal(calls.publish, 0);
+  assert.equal(calls.publish, 1, 'AI 失败不得阻塞归档与已成功总结的发布');
+  assert.equal(result.failed, 1);
+  assert.equal(result.published, true);
 });
 
 test('runSummarizer refuses to publish when validation fails', async () => {
@@ -72,6 +93,22 @@ test('runSummarizer refuses to publish when validation fails', async () => {
   });
   await assert.rejects(() => runSummarizer(deps), /数据校验失败/);
   assert.equal(calls.publish, 0);
+});
+
+test('computeBackfillDays derives the replay window from the newest data day', () => {
+  const now = Date.parse('2026-09-05T10:00:00Z'); // 北京 09-05 18:00
+  assert.equal(computeBackfillDays('2026-09-05', now), 0, '最新一天是今天 → 无需回放');
+  assert.equal(computeBackfillDays('2026-09-04', now), 1, '缺昨天 → 回放 1 天');
+  assert.equal(computeBackfillDays('2026-09-03', now), 2, '缺前天 → 回放 2 天');
+  assert.equal(computeBackfillDays('2026-08-06', now), 30, '缺 30 天 → 回放 30 天');
+  assert.equal(computeBackfillDays('2026-09-06', now), 0, '未来日期按 0 处理');
+  assert.equal(computeBackfillDays('', now), 0);
+});
+
+test('computeBackfillDays respects the Beijing calendar boundary', () => {
+  const now = Date.parse('2026-09-05T16:00:00Z'); // 北京 09-06 00:00，刚跨入新的一天
+  assert.equal(computeBackfillDays('2026-09-05', now), 1);
+  assert.equal(computeBackfillDays('2026-09-06', now), 0);
 });
 
 test('buildWorkQueue honours the recentDays window', () => {

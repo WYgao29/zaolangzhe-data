@@ -31,44 +31,28 @@ data/
 
 仓库不维护任何状态文件：去重、总结完整性和索引计数均从实际日分片重新推导，不依赖不断增长的处理清单。
 
-## 自动管线
+## 全本地架构
 
-Actions 在北京时间 15:00–20:00 每小时运行一次，并在 21:30 再做一次晚间兜底；也支持手动触发和 `backfill_days` 参数。执行顺序为：
+数据的归档与中文总结全部由**本机 launchd 任务**（`com.zaolangzhe.summarize`，北京时间 15:40–21:40 每小时，Mac 唤醒后自动补跑错过的时段）完成，单一写入者，无两写冲突：
 
-1. **单写者守卫**：定时触发时，若最近 26 小时内有"本地中文总结"推送，则整体跳过（本地 launchd 任务是数据的日常写入者，避免两写者对单行 JSON 分片 rebase 撞车；Mac 掉线超 26 小时后 Actions 自动接管。手动触发不受限）。
-2. 运行全部 Node 测试。
-3. 拉取上游三份完整 feed；任一缺失即失败。
-4. 跨日去重，保留英文原文和已有的历史总结。
-5. 将有变化的日分片及 index 原子写入。
-6. 运行数据契约校验；通过后才提交更新。
+1. **归档**：抓取上游最新快照并合并进英文日分片；启动时检测数据缺口（最新数据日早于今天），按缺口天数自动回放上游历史提交——Mac 关机漏掉的天数开机后一次补齐。
+2. **总结**：为缺 `summaryZh` 的条目调用本地模型生成中文总结，逐条原子写盘（分片即检查点，崩溃重跑自动续）。
+3. **发布**：契约校验通过后一次提交推送 + jsDelivr 刷新。AI 失败不阻塞归档发布——英文数据照常上线，失败条目下个时段自动重试。
 
-URL 非 HTTP(S)、分片内或跨日重复、索引路径或计数漂移都会阻止发布。缺少 `summaryZh` 只会产生警告，不会阻止英文原文更新。AI 处理器和提示词仍保留在代码中，但工作队列默认关闭，Actions 不再注入智谱密钥。
+云端 Actions 仅保留 `workflow_dispatch` 手动触发作为应急通道（Mac 长期不可用时回填英文），并受单写者守卫约束：最近 26 小时内有"本地中文总结"推送时，云端运行（含手动）自动跳过。
 
 ## 本地命令
 
 ```bash
+# 手动跑一轮完整任务（归档 + 总结 + 推送；需 oMLX 与 local/env 就绪）
+zsh local/summarize.sh
+# 预览待总结队列与归档缺口（不调模型、不写文件）
+node pipeline/summarize-local.js --dry-run
+# 全量补齐历史缺口（含中文总结）
+node pipeline/summarize-local.js --include-all-missing
 npm test
 npm run validate:data
-npm run dry-run
 ```
-
-`dry-run` 会读取并合并上游快照，但不会写数据或状态。正常管线不需要任何 AI API Key。
-
-## 本地中文总结（MLX）
-
-本地任务只做"总结"这一步：`git pull --rebase` 拿到 Actions 归档的最新英文数据 → 找出缺 `summaryZh` 的条目（默认最近 2 天）→ 逐条调用本地 OpenAI 兼容端点总结 → 每完成一条原子写盘（**分片即检查点**，崩溃重跑自动跳过已完成条目）→ 全量校验 → 一次提交推送 → jsDelivr 刷新。触发时间在 Actions 整点归档之后 40 分钟（15:40–21:40），配合推送失败自动 rebase 重试，两条管线幂等共存。
-
-```bash
-# 1. 配置端点：复制 local/env.example 为 local/env，填 AI_BASE_URL 和 AI_MODEL
-# 2. 预览待总结队列（不调模型、不写文件）
-node pipeline/summarize-local.js --dry-run
-# 3. 手动跑一次（需本地模型服务已启动）
-zsh local/summarize.sh
-# 4. 安装 launchd 定时任务（每天 15:40–21:40，Mac 唤醒后自动补跑错过的时段）
-zsh local/install.sh
-```
-
-可选参数：`--recent-days N` 扩大补漏窗口（默认 2 天）；`--include-all-missing` 全量补齐历史缺口（此模式要求所有条目都有总结才允许发布）。端点只支持 http/https，凭据一律走环境变量、不写入仓库。
 
 注意仓库位置：**不要把本仓库克隆放进 `~/Documents`、`~/Desktop` 等受 TCC 保护的目录**——launchd 直接派生的进程会被 macOS 隐私保护拒绝访问（Operation not permitted）。家目录下的普通路径（如 `~/zaolangzhe-data`）即可。
 

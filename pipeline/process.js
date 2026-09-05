@@ -46,8 +46,8 @@ export function requireAIText(value, label) {
   return value.trim();
 }
 
-async function fetchJSON(url, options = {}) {
-  const response = await fetch(url, {
+async function fetchJSON(url, options = {}, fetchImpl = fetch) {
+  const response = await fetchImpl(url, {
     headers: { 'User-Agent': 'zaolangzhe-pipeline', ...(options.headers || {}) },
     signal: AbortSignal.timeout(options.timeout || 30000),
   });
@@ -55,14 +55,14 @@ async function fetchJSON(url, options = {}) {
   return response.json();
 }
 
-async function fetchFeed(file, ref = 'main') {
+async function fetchFeed(file, ref = 'main', fetchImpl) {
   const urls = [
     `https://raw.githubusercontent.com/${UPSTREAM}/${ref}/${file}`,
     `https://cdn.jsdelivr.net/gh/${UPSTREAM}@${ref}/${file}`,
   ];
   let lastError;
   for (const url of urls) {
-    try { return await fetchJSON(url); }
+    try { return await fetchJSON(url, {}, fetchImpl); }
     catch (error) { lastError = error; }
   }
   throw lastError;
@@ -200,14 +200,45 @@ function flattenSnapshot(feed, batchDay) {
   };
 }
 
-async function collectSnapshots() {
-  if (!BACKFILL_DAYS) return [{ ref: 'main', ms: Date.now() }];
-  const commits = await fetchJSON(`${API_COMMITS}?path=${FEEDS.x}&per_page=100`, { headers: { Accept: 'application/vnd.github+json' } });
-  const cutoff = Date.now() - BACKFILL_DAYS * DAY;
+async function collectUpstreamSnapshots(backfillDays, fetchImpl) {
+  if (!backfillDays) return [{ ref: 'main', ms: Date.now() }];
+  const commits = await fetchJSON(`${API_COMMITS}?path=${FEEDS.x}&per_page=100`, { headers: { Accept: 'application/vnd.github+json' } }, fetchImpl);
+  const cutoff = Date.now() - backfillDays * DAY;
   return commits
     .map(commit => ({ ref: commit.sha, ms: Date.parse(commit.commit?.author?.date || '') }))
     .filter(snapshot => snapshot.ref && Number.isFinite(snapshot.ms) && snapshot.ms >= cutoff)
     .reverse();
+}
+
+/* 归档上游：拉取快照（backfillDays>0 时回放历史提交）并合并进 dayFiles。
+ * 云端 process.js 与本地 summarize-local 共用这一段合并语义。 */
+export async function archiveUpstreamSnapshots(repository, { backfillDays = 0, fetchImpl, log = console.log } = {}) {
+  const snapshots = await collectUpstreamSnapshots(backfillDays, fetchImpl);
+  const addedKeys = new Set();
+  const changedDays = new Set();
+  let duplicateCount = 0;
+  let fetched = 0;
+  for (const snapshot of snapshots) {
+    try {
+      const feed = {
+        x: await fetchFeed(FEEDS.x, snapshot.ref, fetchImpl),
+        podcasts: await fetchFeed(FEEDS.podcasts, snapshot.ref, fetchImpl),
+        blogs: await fetchFeed(FEEDS.blogs, snapshot.ref, fetchImpl),
+      };
+      const generatedMs = Date.parse(feed.x.generatedAt || '') || snapshot.ms;
+      const incoming = flattenSnapshot(feed, beijingDay(generatedMs));
+      const merged = mergeIncoming(repository.dayFiles, incoming);
+      for (const key of merged.addedKeys) addedKeys.add(key);
+      for (const day of merged.changedDays) changedDays.add(day);
+      duplicateCount += merged.duplicates;
+      fetched++;
+      log(`快照 ${snapshot.ref.slice(0, 8).padEnd(8)} ${incoming.day}：新增 ${merged.addedKeys.size}，重复 ${merged.duplicates}`);
+    } catch (error) {
+      log(`快照 ${snapshot.ref.slice(0, 8)} 拉取失败（${error.message}），跳过`);
+    }
+  }
+  if (!fetched) throw new Error('没有成功读取任何完整上游快照');
+  return { addedKeys, changedDays, duplicates: duplicateCount, fetched };
 }
 
 export async function purge(paths) {
@@ -224,32 +255,10 @@ export async function main() {
   const AI_CONFIG = resolveAIConfig(process.env);
   console.log(`造浪者 v3 管线 · ${AI_MODE.enabled ? `AI ${AI_CONFIG.provider}:${AI_CONFIG.model}` : '纯英文'} · 回溯上游 ${BACKFILL_DAYS} 天 · ${DRY_RUN ? 'DRY-RUN' : '正式'}`);
   const repository = loadRepository(ROOT, { migrateV2: true, requireAllSummaries: false });
-  const snapshots = await collectSnapshots();
-  const addedKeys = new Set();
-  const changedDays = new Set(repository.migratedDays);
-  let duplicateCount = 0;
-  let fetched = 0;
-
-  for (const snapshot of snapshots) {
-    try {
-      const feed = {
-        x: await fetchFeed(FEEDS.x, snapshot.ref),
-        podcasts: await fetchFeed(FEEDS.podcasts, snapshot.ref),
-        blogs: await fetchFeed(FEEDS.blogs, snapshot.ref),
-      };
-      const generatedMs = Date.parse(feed.x.generatedAt || '') || snapshot.ms;
-      const incoming = flattenSnapshot(feed, beijingDay(generatedMs));
-      const merged = mergeIncoming(repository.dayFiles, incoming);
-      for (const key of merged.addedKeys) addedKeys.add(key);
-      for (const day of merged.changedDays) changedDays.add(day);
-      duplicateCount += merged.duplicates;
-      fetched++;
-      console.log(`快照 ${snapshot.ref.slice(0, 8).padEnd(8)} ${incoming.day}：新增 ${merged.addedKeys.size}，重复 ${merged.duplicates}`);
-    } catch (error) {
-      console.log(`快照 ${snapshot.ref.slice(0, 8)} 拉取失败（${error.message}），跳过`);
-    }
-  }
-  if (!fetched) throw new Error('没有成功读取任何完整上游快照');
+  const archive = await archiveUpstreamSnapshots(repository, { backfillDays: BACKFILL_DAYS });
+  const addedKeys = archive.addedKeys;
+  const changedDays = new Set([...repository.migratedDays, ...archive.changedDays]);
+  const duplicateCount = archive.duplicates;
 
   const queue = buildWorkQueue(repository.dayFiles, {
     addedKeys,

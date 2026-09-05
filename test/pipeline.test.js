@@ -12,6 +12,7 @@ import {
   writeRepository,
 } from '../pipeline/storage.js';
 import {
+  archiveUpstreamSnapshots,
   processBlog,
   processPodcast,
   processTweet,
@@ -223,6 +224,37 @@ test('writeRepository refuses non-calendar day keys before touching the filesyst
   );
   assert.equal(fs.existsSync(path.join(root, 'data')), false, '拒绝时不得创建任何目录或文件');
   fs.rmSync(root, { recursive: true, force: true });
+});
+
+test('archiveUpstreamSnapshots replays historical snapshots and merges upstream content', async () => {
+  const repository = { dayFiles: new Map() };
+  const fetchImpl = async (url) => ({
+    ok: true,
+    status: 200,
+    json: async () => {
+      if (url.includes('api.github.com')) {
+        return [{ sha: 'abc123def', commit: { author: { date: '2026-09-04T06:00:00Z' } } }];
+      }
+      // 上游每个 feed 文件是独立结构：feed-x.json = { generatedAt, x: [...] }
+      if (url.endsWith('feed-x.json')) {
+        return { generatedAt: '2026-09-04T06:00:00Z', x: [{ handle: 'a', name: 'A', bio: '', tweets: [{ id: 't1', text: 'hello world', createdAt: '2026-09-04T01:00:00Z', url: 'https://x.com/a/status/t1', handle: 'a' }] }] };
+      }
+      if (url.endsWith('feed-podcasts.json')) return { generatedAt: '2026-09-04T06:00:00Z', podcasts: [] };
+      return { generatedAt: '2026-09-04T06:00:00Z', blogs: [] };
+    },
+    text: async () => '',
+  });
+
+  const result = await archiveUpstreamSnapshots(repository, { backfillDays: 2, fetchImpl, log: () => {} });
+
+  assert.equal(result.fetched, 1);
+  assert.equal(result.addedKeys.has('x:t1'), true);
+  assert.equal(result.changedDays.has('2026-09-04'), true);
+  const day = repository.dayFiles.get('2026-09-04');
+  assert.equal(day.x.length, 1);
+  assert.equal(day.x[0].id, 't1');
+  assert.equal(day.x[0].handle, 'a', 'flattenSnapshot 需回填构建者信息');
+  assert.equal(day.schemaVersion, 3);
 });
 
 test('requireAIText rejects empty model output before state can advance', () => {

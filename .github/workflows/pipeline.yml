@@ -1,9 +1,10 @@
 name: pipeline
 
+# 全本地架构下的应急通道：日常归档与中文总结全部由本地 launchd 任务完成
+# （com.zaolangzhe.summarize，北京时间 15:40-21:40 每小时）。
+# 仅保留手动触发，用于 Mac 长期不可用时的云端应急回填；
+# 单写者守卫对所有事件生效——本地总结活跃时手动触发也会自动跳过。
 on:
-  schedule:
-    - cron: '0 7-12 * * *'  # UTC 07:00-12:00 整点 = 北京 15:00-20:00 每小时，紧跟上游更新
-    - cron: '30 13 * * *'   # UTC 13:30 = 北京 21:30 晚间兜底（上游偶尔晚点）
   workflow_dispatch:
     inputs:
       backfill_days:
@@ -24,22 +25,17 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      # 单写者守卫：本地 launchd 总结任务（15:40-21:40）是数据的日常写入者。
-      # 最近 26 小时内有"本地中文总结"推送时，定时归档整体跳过，避免两个写入者
-      # 对同一批单行 JSON 分片做 rebase 撞车；Mac 掉线超 26 小时后 Actions 才接管。
-      # 手动触发不受守卫限制，便于云端应急回填。
-      - name: 本地总结任务活跃时跳过归档
+      # 单写者守卫：本地 launchd 总结任务是数据的日常写入者。
+      # 最近 26 小时内有"本地中文总结"推送时，任何云端运行（含手动）都跳过，
+      # 避免两个写入者对同一批单行 JSON 分片做 rebase 撞车。
+      - name: 本地总结任务活跃时跳过云端运行
         id: local-writer-guard
         run: |
-          if [ "${{ github.event_name }}" != "schedule" ]; then
-            echo "手动触发：不启用单写者守卫"
-            exit 0
-          fi
           if [ -n "$(git log -1 --since='26 hours ago' --grep='本地中文总结' --format=%H)" ]; then
-            echo "最近 26 小时内有本地总结推送，本地为唯一写入者，跳过本次归档"
+            echo "最近 26 小时内有本地总结推送，本地为唯一写入者，跳过云端运行"
             echo "skip=true" >> "$GITHUB_OUTPUT"
           else
-            echo "最近无本地总结推送，正常归档"
+            echo "最近无本地总结推送，放行应急归档"
           fi
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
