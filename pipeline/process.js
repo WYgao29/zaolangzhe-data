@@ -7,18 +7,13 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { beijingDay, buildIndex, hasNonEmptyText, validateIndex } from './contract.js';
-import { atomicWriteJSON, buildWorkQueue, loadRepository, mergeIncoming, writeRepository } from './storage.js';
+import { buildWorkQueue, loadRepository, mergeIncoming, writeRepository } from './storage.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.join(HERE, '..');
-const STATE_PATH = path.join(ROOT, 'state', 'processed.json');
 const UPSTREAM = 'zarazhangrui/follow-builders';
 const API_COMMITS = `https://api.github.com/repos/${UPSTREAM}/commits`;
 const FEEDS = { x: 'feed-x.json', podcasts: 'feed-podcasts.json', blogs: 'feed-blogs.json' };
-const ZHIPU = 'https://open.bigmodel.cn/api/paas/v4';
-const MODEL = process.env.ZHIPU_MODEL || 'glm-5.3-flash';
-const KEY = process.env.ZHIPU_API_KEY || '';
-const CONCURRENCY = 2;
 const DAY = 86400000;
 
 const args = process.argv.slice(2);
@@ -73,31 +68,79 @@ async function fetchFeed(file, ref = 'main') {
   throw lastError;
 }
 
-async function ai(messages, { maxTokens = 8192, timeout = 180000 } = {}) {
-  const body = JSON.stringify({
-    model: MODEL,
-    temperature: 0.3,
-    max_tokens: maxTokens,
-    thinking: { type: 'enabled', length: 'low' },
-    messages,
-  });
-  const once = async () => {
-    const response = await fetch(`${ZHIPU}/chat/completions`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + KEY },
-      body,
-      signal: AbortSignal.timeout(timeout),
-    });
-    if (!response.ok) throw new Error('HTTP ' + response.status + ' ' + (await response.text()).slice(0, 120));
-    const data = await response.json();
-    return data.choices?.[0]?.message?.content || '';
-  };
-  try { return await once(); }
-  catch (error) {
-    console.log(`    ↻ 重试（${error.message}）`);
-    await sleep(3000);
-    return once();
+/* ---------- AI 客户端（提供者无关） ----------
+ * zhipu：智谱云端 API（默认，含专有 thinking 字段，需要密钥）。
+ * openai：任意 OpenAI 兼容端点（本地 MLX/LM Studio/Ollama 等，无需密钥）。
+ * 凭据一律从环境变量读取，源码与配置文件不写密钥。 */
+export function resolveAIConfig(env = process.env) {
+  const provider = String(env.AI_PROVIDER || 'zhipu').trim().toLowerCase() || 'zhipu';
+  if (provider !== 'zhipu' && provider !== 'openai') {
+    throw new Error(`未知 AI_PROVIDER：${provider}（可选 zhipu / openai）`);
   }
+  let baseURL = '';
+  if (provider === 'zhipu') {
+    baseURL = 'https://open.bigmodel.cn/api/paas/v4';
+  } else {
+    baseURL = String(env.AI_BASE_URL || '').trim().replace(/\/+$/, '');
+    if (!baseURL) throw new Error('AI_PROVIDER=openai 需要设置 AI_BASE_URL（本地 OpenAI 兼容端点）');
+    if (!/^https?:\/\//i.test(baseURL)) throw new Error(`AI_BASE_URL 必须是 http/https：${baseURL}`);
+  }
+  const model = String(env.AI_MODEL || (provider === 'zhipu' ? env.ZHIPU_MODEL : '') || (provider === 'zhipu' ? 'glm-5.3-flash' : '')).trim();
+  if (!model) throw new Error('AI_PROVIDER=openai 需要设置 AI_MODEL（本地模型名）');
+  const apiKey = String(env.AI_API_KEY || (provider === 'zhipu' ? env.ZHIPU_API_KEY : '') || '');
+  const parsePositive = (raw, fallback) => {
+    const value = Number(raw);
+    return Number.isFinite(value) && value > 0 ? value : fallback;
+  };
+  const rawConcurrency = Math.floor(Number(env.AI_CONCURRENCY));
+  return {
+    provider,
+    baseURL,
+    model,
+    apiKey,
+    needsKey: provider === 'zhipu',
+    bodyExtras: provider === 'zhipu' ? { thinking: { type: 'enabled', length: 'low' } } : {},
+    timeoutMs: parsePositive(env.AI_TIMEOUT_MS, 180000),
+    concurrency: Number.isFinite(rawConcurrency) ? Math.max(1, rawConcurrency) : 2,
+  };
+}
+
+export function createAIClient(config, { fetchImpl = fetch, sleepMs = 3000 } = {}) {
+  const headers = { 'Content-Type': 'application/json' };
+  if (config.apiKey) headers.Authorization = 'Bearer ' + config.apiKey;
+  const wait = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+  return async function ai(messages, { maxTokens = 8192, timeout } = {}) {
+    const body = JSON.stringify({
+      model: config.model,
+      temperature: 0.3,
+      max_tokens: maxTokens,
+      ...config.bodyExtras,
+      messages,
+    });
+    const once = async () => {
+      const response = await fetchImpl(`${config.baseURL}/chat/completions`, {
+        method: 'POST',
+        headers,
+        body,
+        signal: AbortSignal.timeout(timeout || config.timeoutMs),
+      });
+      if (!response.ok) throw new Error('HTTP ' + response.status + ' ' + (await response.text()).slice(0, 120));
+      const data = await response.json();
+      return data.choices?.[0]?.message?.content || '';
+    };
+    try { return requireAIText(await once(), 'AI 返回'); }
+    catch (error) {
+      console.log(`    ↻ 重试（${error.message}）`);
+      await wait(sleepMs);
+      return requireAIText(await once(), 'AI 返回');
+    }
+  };
+}
+
+let defaultClient = null;
+function ai(messages, options = {}) {
+  if (!defaultClient) defaultClient = createAIClient(resolveAIConfig(process.env));
+  return defaultClient(messages, options);
 }
 
 function parseJSONLoose(text) {
@@ -110,7 +153,7 @@ function parseJSONLoose(text) {
 
 export async function processTweet(item, aiCall = ai) {
   item.summaryZh = requireAIText(await aiCall([
-    { role: 'system', content: '你是科技资讯编辑。用简体中文总结英文推文的核心信息，通常 1–2 句、约 80 个中文字符以内；保留关键人物、产品名、数字和结论；忽略非关键链接、@提及和话题标签；不要逐句翻译，不要解释或加引号，只输出总结。' },
+    { role: 'system', content: '你是科技资讯编辑。用简体中文总结英文推文的核心信息，通常 1–2 句、约 80 个中文字符以内；保留关键人物、产品名、数字和结论；忽略非关键链接、@提及和话题标签；不要逐句翻译，不要解释或加引号，只输出总结。若推文只有链接没有正文，输出"分享了一条链接，未附文字说明。"' },
     { role: 'user', content: item.text },
   ]), '推文总结');
 }
@@ -167,13 +210,7 @@ async function collectSnapshots() {
     .reverse();
 }
 
-function readState() {
-  if (!fs.existsSync(STATE_PATH)) return { upstreamSha: '' };
-  const value = JSON.parse(fs.readFileSync(STATE_PATH, 'utf8'));
-  return { upstreamSha: value.upstreamSha || '' };
-}
-
-async function purge(paths) {
+export async function purge(paths) {
   for (const value of paths) {
     try {
       const response = await fetch(`https://purge.jsdelivr.net/gh/WYgao29/zaolangzhe-data@main/${value}`, { signal: AbortSignal.timeout(30000) });
@@ -184,15 +221,14 @@ async function purge(paths) {
 }
 
 export async function main() {
-  console.log(`造浪者 v3 管线 · ${AI_MODE.enabled ? `AI ${MODEL}` : '纯英文'} · 回溯上游 ${BACKFILL_DAYS} 天 · ${DRY_RUN ? 'DRY-RUN' : '正式'}`);
+  const AI_CONFIG = resolveAIConfig(process.env);
+  console.log(`造浪者 v3 管线 · ${AI_MODE.enabled ? `AI ${AI_CONFIG.provider}:${AI_CONFIG.model}` : '纯英文'} · 回溯上游 ${BACKFILL_DAYS} 天 · ${DRY_RUN ? 'DRY-RUN' : '正式'}`);
   const repository = loadRepository(ROOT, { migrateV2: true, requireAllSummaries: false });
-  const state = readState();
   const snapshots = await collectSnapshots();
   const addedKeys = new Set();
   const changedDays = new Set(repository.migratedDays);
   let duplicateCount = 0;
   let fetched = 0;
-  let newestSha = state.upstreamSha;
 
   for (const snapshot of snapshots) {
     try {
@@ -208,7 +244,6 @@ export async function main() {
       for (const day of merged.changedDays) changedDays.add(day);
       duplicateCount += merged.duplicates;
       fetched++;
-      if (snapshot.ref !== 'main') newestSha = snapshot.ref;
       console.log(`快照 ${snapshot.ref.slice(0, 8).padEnd(8)} ${incoming.day}：新增 ${merged.addedKeys.size}，重复 ${merged.duplicates}`);
     } catch (error) {
       console.log(`快照 ${snapshot.ref.slice(0, 8)} 拉取失败（${error.message}），跳过`);
@@ -229,15 +264,16 @@ export async function main() {
     console.log(`dry-run 结束：仓库警告 ${repository.warnings.length}，未调用 AI、未写文件。`);
     return;
   }
-  if (work.length && !KEY) throw new Error('缺少 ZHIPU_API_KEY');
+  if (work.length && AI_CONFIG.needsKey && !AI_CONFIG.apiKey) throw new Error('缺少 ZHIPU_API_KEY');
 
   let done = 0;
   let failed = 0;
-  for (let offset = 0; offset < work.length; offset += CONCURRENCY) {
-    const chunk = work.slice(offset, offset + CONCURRENCY);
+  const aiCall = createAIClient(AI_CONFIG);
+  for (let offset = 0; offset < work.length; offset += AI_CONFIG.concurrency) {
+    const chunk = work.slice(offset, offset + AI_CONFIG.concurrency);
     await Promise.all(chunk.map(async entry => {
       try {
-        await PROCESSORS[entry.kind](entry.item);
+        await PROCESSORS[entry.kind](entry.item, aiCall);
         done++;
         changedDays.add(entry.day);
         console.log(`  ✓ [${done}/${work.length}] ${entry.kind} ${entry.key}`);
@@ -259,7 +295,6 @@ export async function main() {
   writeRepository(ROOT, repository.dayFiles, generatedAt, changedDays, {
     requireAllSummaries: AI_MODE.requireAllSummaries,
   });
-  atomicWriteJSON(STATE_PATH, { upstreamSha: newestSha });
   await purge(['data/index.json', ...[...changedDays].map(day => `data/days/${day}.json`)]);
   console.log(`完成：成功 ${done}，失败 ${failed}，更新 ${changedDays.size} 天`);
 }

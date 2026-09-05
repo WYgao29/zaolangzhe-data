@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- 模板：local/install.sh 会把 __REPO__ 替换为本机仓库路径后装到 ~/Library/LaunchAgents -->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.zaolangzhe.summarize</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/zsh</string>
+    <string>__REPO__/local/summarize.sh</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>__REPO__</string>
+
+  <!-- launchd 默认无 UTF-8 locale，zsh 会打不开中文路径；必须显式指定 -->
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>LANG</key>
+    <string>zh_CN.UTF-8</string>
+  </dict>
+
+  <!-- 北京时间 15:40–20:40 每小时一次，21:40 晚间兜底；
+       与 Actions 的整点归档错开 40 分钟，避免推送撞车。
+       Mac 睡觉错过的时间点，launchd 会在唤醒后补跑一次。 -->
+  <key>StartCalendarInterval</key>
+  <array>
+    <dict><key>Hour</key><integer>15</integer><key>Minute</key><integer>40</integer></dict>
+    <dict><key>Hour</key><integer>16</integer><key>Minute</key><integer>40</integer></dict>
+    <dict><key>Hour</key><integer>17</integer><key>Minute</key><integer>40</integer></dict>
+    <dict><key>Hour</key><integer>18</integer><key>Minute</key><integer>40</integer></dict>
+    <dict><key>Hour</key><integer>19</integer><key>Minute</key><integer>40</integer></dict>
+    <dict><key>Hour</key><integer>20</integer><key>Minute</key><integer>40</integer></dict>
+    <dict><key>Hour</key><integer>21</integer><key>Minute</key><integer>40</integer></dict>
+  </array>
+
+  <key>StandardOutPath</key>
+  <string>__REPO__/local/logs/launchd.log</string>
+  <key>StandardErrorPath</key>
+  <string>__REPO__/local/logs/launchd.log</string>
+</dict>
+</plist>

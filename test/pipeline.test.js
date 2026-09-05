@@ -9,6 +9,7 @@ import {
   buildWorkQueue,
   loadRepository,
   mergeIncoming,
+  writeRepository,
 } from '../pipeline/storage.js';
 import {
   processBlog,
@@ -194,6 +195,33 @@ test('loadRepository rejects an invalid v3 shard path before reading it', () => 
   });
 
   assert.throws(() => loadRepository(root), /路径/);
+  fs.rmSync(root, { recursive: true, force: true });
+});
+
+test('loadRepository rejects index day keys that are not calendar dates', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'zaolangzhe-daykey-'));
+  fs.mkdirSync(path.join(root, 'data', 'days'), { recursive: true });
+  // day 键 "../outside" 与 path "data/days/../outside.json" 互相印证时，
+  // 读文件会落到 data/days 之外（path.join 规范化后为 data/outside.json）；
+  // day 键必须是日历日。
+  fs.writeFileSync(path.join(root, 'data', 'outside.json'), JSON.stringify(dayFile('2026-08-30', { x: [tweet('one')] })));
+  fs.writeFileSync(path.join(root, 'data', 'index.json'), JSON.stringify({
+    schemaVersion: 3, generatedAt: '2026-08-30T07:00:00Z',
+    days: [{ day: '../outside', path: 'data/days/../outside.json', counts: { x: 1, podcasts: 0, blogs: 0 } }],
+  }));
+
+  assert.throws(() => loadRepository(root), /路径无效|日期/);
+  fs.rmSync(root, { recursive: true, force: true });
+});
+
+test('writeRepository refuses non-calendar day keys before touching the filesystem', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'zaolangzhe-writeday-'));
+  const dayFiles = new Map([['../evil', dayFile('../evil', { x: [] })]]);
+  assert.throws(
+    () => writeRepository(root, dayFiles, '2026-09-04T08:00:00Z', new Set(['../evil'])),
+    /非日历日/,
+  );
+  assert.equal(fs.existsSync(path.join(root, 'data')), false, '拒绝时不得创建任何目录或文件');
   fs.rmSync(root, { recursive: true, force: true });
 });
 

@@ -1,6 +1,6 @@
 # zaolangzhe-data · 造浪者数据归档
 
-[follow-builders](https://github.com/zarazhangrui/follow-builders) 公开聚合数据的分日归档。自动管线抓取上游完整快照，并按北京时间批次日写入 v3 日分片。云端 AI 总结目前已暂停，新数据只保存英文原文。
+[follow-builders](https://github.com/zarazhangrui/follow-builders) 公开聚合数据的分日归档。Actions 每小时抓取上游完整快照并按北京时间批次日写入英文 v3 日分片（公开仓库免费、不消耗 token）；中文总结由本机 launchd 定时任务调用本地模型生成后推送，云端 AI 不再消耗 token。
 
 ## v3 数据契约
 
@@ -29,7 +29,7 @@ data/
 
 每个日分片均为 `{ schemaVersion, day, generatedAt, x, podcasts, blogs }`。三个内容字段都是扁平数组；唯一键依次为推文 `id`、播客 `guid`、博客 `url`。英文原文保存在 `text`、`transcript` 或 `content`。`summaryZh` 是可选的历史中文总结字段；v3 不保存中文标题或全文翻译。
 
-`state/processed.json` 只记录已处理的上游提交 SHA。去重、总结完整性和索引计数均从实际日分片重新推导，不依赖不断增长的处理清单。
+仓库不维护任何状态文件：去重、总结完整性和索引计数均从实际日分片重新推导，不依赖不断增长的处理清单。
 
 ## 自动管线
 
@@ -53,16 +53,32 @@ npm run dry-run
 
 `dry-run` 会读取并合并上游快照，但不会写数据或状态。正常管线不需要任何 AI API Key。
 
-## 恢复 AI 加工
+## 本地中文总结（MLX）
 
-AI 处理代码没有删除。未来换成可用的云端或本地 OpenAI 兼容接口后，先在本地执行全量补缺：
+本地任务只做"总结"这一步：`git pull --rebase` 拿到 Actions 归档的最新英文数据 → 找出缺 `summaryZh` 的条目（默认最近 2 天）→ 逐条调用本地 OpenAI 兼容端点总结 → 每完成一条原子写盘（**分片即检查点**，崩溃重跑自动跳过已完成条目）→ 全量校验 → 一次提交推送 → jsDelivr 刷新。触发时间在 Actions 整点归档之后 40 分钟（15:40–21:40），配合推送失败自动 rebase 重试，两条管线幂等共存。
+
+```bash
+# 1. 配置端点：复制 local/env.example 为 local/env，填 AI_BASE_URL 和 AI_MODEL
+# 2. 预览待总结队列（不调模型、不写文件）
+node pipeline/summarize-local.js --dry-run
+# 3. 手动跑一次（需本地模型服务已启动）
+zsh local/summarize.sh
+# 4. 安装 launchd 定时任务（每天 15:40–21:40，Mac 唤醒后自动补跑错过的时段）
+zsh local/install.sh
+```
+
+可选参数：`--recent-days N` 扩大补漏窗口（默认 2 天）；`--include-all-missing` 全量补齐历史缺口（此模式要求所有条目都有总结才允许发布）。端点只支持 http/https，凭据一律走环境变量、不写入仓库。
+
+注意仓库位置：**不要把本仓库克隆放进 `~/Documents`、`~/Desktop` 等受 TCC 保护的目录**——launchd 直接派生的进程会被 macOS 隐私保护拒绝访问（Operation not permitted）。家目录下的普通路径（如 `~/zaolangzhe-data`）即可。
+
+## 恢复云端 AI 加工（可选）
+
+提供者由 `AI_PROVIDER` 决定：默认 `zhipu`（智谱云端，保留专有 thinking 字段，需要密钥）；`openai` 为任意 OpenAI 兼容端点（本地 MLX/LM Studio/Ollama 等，无需密钥），超时与并发可用 `AI_TIMEOUT_MS`、`AI_CONCURRENCY` 覆盖。云端全量补缺（消耗 token，谨慎使用）：
 
 ```bash
 AI_PROCESSING_ENABLED=true ZHIPU_API_KEY=可用密钥 \
   node pipeline/process.js --include-all-missing
 ```
-
-AI 模式会自动恢复“所有条目必须有 `summaryZh`”的严格校验；任何历史缺口未填完时都不会发布。全量补缺通过后，再把 `AI_PROCESSING_ENABLED=true` 和对应密钥注入 Actions；本次纯英文版本不注入这两项。
 
 旧 v1 聚合格式已停止支持。当前 v2 到 v3 的转换由正式管线在内存中自动完成，无需单独运行迁移脚本或本地写数据。
 

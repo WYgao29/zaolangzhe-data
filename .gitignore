@@ -1,2 +1,8 @@
 .DS_Store
 .worktrees/
+
+.mimosa/
+
+# 本地总结的机器相关配置与日志
+local/env
+local/logs/

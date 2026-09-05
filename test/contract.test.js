@@ -123,6 +123,28 @@ test('buildIndex sorts days newest first and records literal counts', () => {
   });
 });
 
+test('validateIndex rejects day keys that are not calendar dates', () => {
+  const files = new Map([
+    ['../outside', dayFile('2026-08-30', { x: [tweet()] })],
+  ]);
+  const index = {
+    schemaVersion: 3, generatedAt: '2026-08-30T07:00:00Z',
+    days: [{ day: '../outside', path: 'data/days/../outside.json', counts: { x: 1, podcasts: 0, blogs: 0 } }],
+  };
+  const result = validateIndex(index, files, { now: NOW });
+  assert.ok(result.errors.some(x => x.includes('日期')));
+});
+
+test('validateIndex rejects a day file whose internal day disagrees with the index', () => {
+  const files = new Map([['2026-08-30', dayFile('2026-08-29', { x: [tweet()] })]]);
+  const index = {
+    schemaVersion: 3, generatedAt: '2026-08-30T07:00:00Z',
+    days: [{ day: '2026-08-30', path: 'data/days/2026-08-30.json', counts: { x: 1, podcasts: 0, blogs: 0 } }],
+  };
+  const result = validateIndex(index, files, { now: NOW });
+  assert.ok(result.errors.some(x => x.includes('日期')));
+});
+
 test('validateIndex rejects path traversal, count drift, and cross-day duplicates', () => {
   const files = new Map([
     ['2026-08-30', dayFile('2026-08-30', { x: [tweet()] })],

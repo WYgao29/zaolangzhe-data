@@ -4,6 +4,7 @@ import path from 'node:path';
 import {
   beijingDay,
   buildIndex,
+  DAY_RE,
   hasNonEmptyText,
   itemKey,
   mergeDuplicate,
@@ -21,7 +22,8 @@ function readJSON(file) {
 function validateIndexPathsForRead(index) {
   if (!Array.isArray(index?.days)) throw new Error('index days 必须是数组');
   for (const entry of index.days) {
-    if (entry?.path !== `data/days/${entry?.day}.json`) {
+    // day 键必须是日历日：防止 path 与 day 互相印证时读到 data/days 之外
+    if (!DAY_RE.test(entry?.day || '') || entry?.path !== `data/days/${entry?.day}.json`) {
       throw new Error(`index 路径无效：${entry?.day || '未知日期'}`);
     }
   }
@@ -119,11 +121,11 @@ function missingSummary(item) {
 }
 
 export function buildWorkQueue(dayFiles, {
-  addedKeys = new Set(), now = Date.now(), includeAllMissing = false, aiEnabled = false,
+  addedKeys = new Set(), now = Date.now(), includeAllMissing = false, aiEnabled = false, recentDays = 2,
 } = {}) {
-  // AI 总结暂停。原队列代码保留，未来恢复时显式传入 aiEnabled: true。
+  // AI 总结暂停时返回空队列。显式传入 aiEnabled: true 才会生成任务。
   if (!aiEnabled) return { work: [], newCount: 0, selfHealCount: 0 };
-  const cutoff = beijingDay(now - 2 * DAY);
+  const cutoff = beijingDay(now - Math.max(0, recentDays) * DAY);
   const work = [];
   let newCount = 0;
   let selfHealCount = 0;
@@ -144,6 +146,11 @@ export function buildWorkQueue(dayFiles, {
 }
 
 export function writeRepository(root, dayFiles, generatedAt, changedDays = new Set(dayFiles.keys()), { requireAllSummaries = true } = {}) {
+  // sink 防御：day 键拼进文件路径，非日历日在写任何临时文件之前直接拒绝。
+  // 正常调用链里 dayFiles 已经过 validateIndex 的 DAY_RE 校验，这里是独立不变量。
+  for (const day of changedDays) {
+    if (!DAY_RE.test(day)) throw new Error(`writeRepository 拒绝非日历日：${day}`);
+  }
   const index = buildIndex(dayFiles, generatedAt);
   for (const day of changedDays) {
     const file = dayFiles.get(day);

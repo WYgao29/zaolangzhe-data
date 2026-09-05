@@ -2,6 +2,7 @@ const DAY_RE = /^\d{4}-\d{2}-\d{2}$/;
 const KINDS = ['x', 'podcasts', 'blogs'];
 const STRICT_TEXT_FIELDS = new Set(['summaryZh', 'text', 'title', 'transcript', 'content']);
 export const REMOVED_TRANSLATION_FIELDS = ['textZh', 'titleZh', 'contentZh', 'transcriptZh'];
+export { DAY_RE };
 
 export function beijingDay(ms) {
   const date = new Date(ms);
@@ -39,6 +40,8 @@ export function richnessScore(kind, item) {
 }
 
 export function mergeDuplicate(kind, older, newer) {
+  // 注意：本仓按 richness 评分择优合并；网页端 data-core.js 的 mergeRichItem
+  // 是"新值优先 + 空缺回填"。两端策略是各自实现的约定，修改前先看对方。
   const preferred = richnessScore(kind, newer) >= richnessScore(kind, older) ? newer : older;
   const fallback = preferred === newer ? older : newer;
   const merged = { ...fallback, ...preferred };
@@ -153,9 +156,11 @@ export function validateIndex(index, dayFiles, { requireAllSummaries = true } = 
   for (const entry of index.days) {
     if (daySeen.has(entry.day)) result.errors.push(`index 日期重复 ${entry.day}`);
     daySeen.add(entry.day);
+    if (!DAY_RE.test(entry.day || '')) result.errors.push(`index 日期无效：${entry.day || '未知日期'}`);
     if (entry.path !== `data/days/${entry.day}.json`) result.errors.push(`${entry.day} 路径无效`);
     const file = dayFiles.get(entry.day);
     if (!file) { result.errors.push(`${entry.day} 缺少日分片`); continue; }
+    if (file.day !== entry.day) result.errors.push(`${entry.day} 日分片日期不一致`);
     const validation = validateDayFile(file, { requireAllSummaries });
     result.errors.push(...validation.errors.map(x => `${entry.day}: ${x}`));
     result.warnings.push(...validation.warnings.map(x => `${entry.day}: ${x}`));
