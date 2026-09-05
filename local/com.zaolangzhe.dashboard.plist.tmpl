@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- 模板：local/install.sh 会把 __REPO__ / __NODE__ 替换为本机路径后装到 ~/Library/LaunchAgents -->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.zaolangzhe.dashboard</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>__NODE__</string>
+    <string>__REPO__/local/dashboard.js</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>__REPO__</string>
+
+  <!-- 常驻：崩溃或被杀后 launchd 自动拉起 -->
+  <key>KeepAlive</key>
+  <true/>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>LANG</key>
+    <string>zh_CN.UTF-8</string>
+  </dict>
+
+  <key>StandardOutPath</key>
+  <string>__REPO__/local/logs/dashboard.log</string>
+  <key>StandardErrorPath</key>
+  <string>__REPO__/local/logs/dashboard.log</string>
+</dict>
+</plist>

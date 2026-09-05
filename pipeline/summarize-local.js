@@ -7,11 +7,13 @@
 'use strict';
 
 import { execFile } from 'node:child_process';
+import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 
 import { beijingDay, buildIndex, validateIndex } from './contract.js';
+import { createRunStateRecorder } from './run-state.js';
 import {
   archiveUpstreamSnapshots,
   createAIClient,
@@ -39,8 +41,16 @@ const getArg = (name) => {
   const raw = args[index + 1];
   return raw && !raw.startsWith('--') ? Number(raw) : undefined;
 };
+const getArgValue = (name) => {
+  const index = args.indexOf('--' + name);
+  if (index === -1 || index + 1 >= args.length) return undefined;
+  const raw = args[index + 1];
+  return raw && !raw.startsWith('--') ? raw.trim() : undefined;
+};
 const recentArg = getArg('recent-days');
 const RECENT_DAYS = Number.isFinite(recentArg) ? Math.max(0, recentArg) : 2;
+const TRIGGER_RAW = getArgValue('trigger');
+const TRIGGER = ['schedule', 'dashboard', 'manual'].includes(TRIGGER_RAW) ? TRIGGER_RAW : 'manual';
 
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
@@ -60,19 +70,23 @@ export function computeBackfillDays(newestDay, now = Date.now()) {
  * 编排顺序：pull → 归档（含检查点）→ 建队列 → 逐条总结（含检查点）→ 校验 → 发布。
  * AI 失败只计数、不抛出——已成功内容与归档照常发布，失败条目下个时段自动重试。 */
 export async function runSummarizer({
-  pull, loadRepo, archive, buildQueue, summarize, checkpoint, validateAll, publish, log = () => {},
+  pull, loadRepo, archive, buildQueue, summarize, checkpoint, validateAll, publish, report = () => {}, log = () => {},
 }) {
   await pull();
   const repository = await loadRepo();
 
+  report({ phase: 'archive' });
   const archiveResult = await archive(repository);
   const changedDays = new Set(archiveResult.changedDays);
   if (changedDays.size) {
     await checkpoint(repository, changedDays);
     log(`归档上游：新增 ${archiveResult.addedKeys.size} · 重复 ${archiveResult.duplicates} · 更新 ${changedDays.size} 天`);
   }
+  report({ phase: 'queue' });
 
   const queue = buildQueue(repository);
+  const work = { total: queue.work.length, done: 0, failed: 0 };
+  report({ phase: 'summarize', work: { ...work } });
   log(`待总结 ${queue.work.length} 条（新增 ${queue.newCount} · 自愈 ${queue.selfHealCount}）`);
   if (!queue.work.length) log('没有需要总结的条目');
 
@@ -80,15 +94,20 @@ export async function runSummarizer({
   let failed = 0;
   for (const entry of queue.work) {
     const startedAt = Date.now();
+    report({ current: { kind: entry.kind, key: entry.key, day: entry.day } });
     try {
       await summarize(entry);
       changedDays.add(entry.day);
       processed++;
+      work.done++;
       await checkpoint(repository, new Set([entry.day]));
+      report({ work: { ...work }, current: { kind: entry.kind, key: entry.key, day: entry.day } });
       const seconds = ((Date.now() - startedAt) / 1000).toFixed(1);
       log(`  ✓ ${entry.kind} ${entry.key} → ${entry.day} · ${seconds}s`);
     } catch (error) {
       failed++;
+      work.failed++;
+      report({ work: { ...work }, current: { kind: entry.kind, key: entry.key, day: entry.day }, lastError: error.message });
       const seconds = ((Date.now() - startedAt) / 1000).toFixed(1);
       log(`  ✗ ${entry.kind} ${entry.key}（${seconds}s）：${error.message}`);
     }
@@ -97,6 +116,7 @@ export async function runSummarizer({
   const validation = validateAll(repository);
   if (validation.errors.length) throw new Error('数据校验失败，未提交推送:\n' + validation.errors.join('\n'));
 
+  report({ phase: 'publish' });
   let published = false;
   if (changedDays.size) {
     await publish({ changedDays });
@@ -104,7 +124,9 @@ export async function runSummarizer({
   } else {
     log('没有需要发布的变化，结束');
   }
-  return { processed, failed, published };
+  const result = { processed, failed, published };
+  report({ phase: 'done', result });
+  return result;
 }
 
 async function git(root, gitArgs, { timeout = 120000 } = {}) {
@@ -137,49 +159,74 @@ export async function main(runtimeArgs = args) {
   const dryRun = runtimeArgs.includes('--dry-run');
   console.log(`造浪者本地任务 · ${AI_CONFIG.provider}:${AI_CONFIG.model} · 最近 ${RECENT_DAYS} 天${INCLUDE_ALL ? ' · 全量补漏' : ''}${dryRun ? ' · DRY-RUN' : ''}`);
 
-  const result = await runSummarizer({
-    log: console.log,
-    pull: async () => {
-      if (dryRun) return console.log('DRY-RUN：跳过 git pull');
-      const stdout = await git(ROOT, ['pull', '--rebase', '--autostash']);
-      console.log('已同步远端：' + stdout.trim().split('\n')[0]);
-    },
-    loadRepo: async () => loadRepository(ROOT, { migrateV2: true, requireAllSummaries: false }),
-    archive: async (repository) => {
-      if (dryRun) return { addedKeys: new Set(), changedDays: new Set(), duplicates: 0, fetched: 0 };
-      const newestDay = repository.index?.days?.[0]?.day || '';
-      const backfillDays = computeBackfillDays(newestDay, Date.now());
-      if (backfillDays > 0) console.log(`检测到数据缺口 ${backfillDays} 天，自动回放上游历史快照`);
-      return archiveUpstreamSnapshots(repository, { backfillDays });
-    },
-    buildQueue: (repository) => buildWorkQueue(repository.dayFiles, {
-      now: Date.now(), aiEnabled: true, includeAllMissing: INCLUDE_ALL, recentDays: RECENT_DAYS,
-    }),
-    summarize: async (entry) => {
-      if (dryRun) return; // 预览队列即可，不调用模型、不改动数据
-      await PROCESSORS[entry.kind](entry.item, createAIClient(AI_CONFIG));
-    },
-    checkpoint: async (repository, days) => {
-      if (dryRun) return;
-      writeRepository(ROOT, repository.dayFiles, new Date().toISOString(), days, { requireAllSummaries: false });
-    },
-    validateAll: (repository) => validateIndex(
-      buildIndex(repository.dayFiles, new Date().toISOString()),
-      repository.dayFiles,
-      { requireAllSummaries: false }, // 解耦：缺总结只是警告，不得阻塞归档发布
-    ),
-    publish: async ({ changedDays }) => {
-      if (dryRun) return console.log(`DRY-RUN：将更新 ${changedDays.size} 天，不提交推送`);
-      const status = await git(ROOT, ['status', '--porcelain', '--', 'data']);
-      if (!status.trim()) return console.log('无新增内容，跳过提交');
-      await git(ROOT, ['add', 'data']);
-      await git(ROOT, ['commit', '-m', `本地中文总结 ${new Date().toISOString().slice(0, 10)}`]);
-      await pushWithRetry(ROOT);
-      console.log('已推送 GitHub');
-      await purge(['data/index.json', ...[...changedDays].map(day => `data/days/${day}.json`)]);
-    },
+  const startedAt = new Date().toISOString();
+  const recorder = createRunStateRecorder(path.join(ROOT, 'local', 'run-state.json'));
+  recorder.record({
+    running: true, phase: 'pull', trigger: TRIGGER,
+    model: `${AI_CONFIG.provider}:${AI_CONFIG.model}`, startedAt, dryRun,
   });
+
+  let result;
+  try {
+    result = await runSummarizer({
+      log: console.log,
+      report: (patch) => recorder.record(patch),
+      pull: async () => {
+        if (dryRun) return console.log('DRY-RUN：跳过 git pull');
+        const stdout = await git(ROOT, ['pull', '--rebase', '--autostash']);
+        console.log('已同步远端：' + stdout.trim().split('\n')[0]);
+      },
+      loadRepo: async () => loadRepository(ROOT, { migrateV2: true, requireAllSummaries: false }),
+      archive: async (repository) => {
+        if (dryRun) return { addedKeys: new Set(), changedDays: new Set(), duplicates: 0, fetched: 0 };
+        const newestDay = repository.index?.days?.[0]?.day || '';
+        const backfillDays = computeBackfillDays(newestDay, Date.now());
+        if (backfillDays > 0) console.log(`检测到数据缺口 ${backfillDays} 天，自动回放上游历史快照`);
+        return archiveUpstreamSnapshots(repository, { backfillDays });
+      },
+      buildQueue: (repository) => buildWorkQueue(repository.dayFiles, {
+        now: Date.now(), aiEnabled: true, includeAllMissing: INCLUDE_ALL, recentDays: RECENT_DAYS,
+      }),
+      summarize: async (entry) => {
+        if (dryRun) return; // 预览队列即可，不调用模型、不改动数据
+        await PROCESSORS[entry.kind](entry.item, createAIClient(AI_CONFIG));
+      },
+      checkpoint: async (repository, days) => {
+        if (dryRun) return;
+        writeRepository(ROOT, repository.dayFiles, new Date().toISOString(), days, { requireAllSummaries: false });
+      },
+      validateAll: (repository) => validateIndex(
+        buildIndex(repository.dayFiles, new Date().toISOString()),
+        repository.dayFiles,
+        { requireAllSummaries: false }, // 解耦：缺总结只是警告，不得阻塞归档发布
+      ),
+      publish: async ({ changedDays }) => {
+        if (dryRun) return console.log(`DRY-RUN：将更新 ${changedDays.size} 天，不提交推送`);
+        const status = await git(ROOT, ['status', '--porcelain', '--', 'data']);
+        if (!status.trim()) return console.log('无新增内容，跳过提交');
+        await git(ROOT, ['add', 'data']);
+        await git(ROOT, ['commit', '-m', `本地中文总结 ${new Date().toISOString().slice(0, 10)}`]);
+        await pushWithRetry(ROOT);
+        console.log('已推送 GitHub');
+        await purge(['data/index.json', ...[...changedDays].map(day => `data/days/${day}.json`)]);
+      },
+    });
+  } catch (error) {
+    const message = error.message || String(error);
+    recorder.record({ running: false, phase: 'failed', error: message, finishedAt: new Date().toISOString() });
+    appendHistory({ startedAt, finishedAt: new Date().toISOString(), trigger: TRIGGER, model: `${AI_CONFIG.provider}:${AI_CONFIG.model}`, error: message, published: false });
+    throw error;
+  }
+  recorder.finish(result);
+  appendHistory({ startedAt, finishedAt: new Date().toISOString(), trigger: TRIGGER, model: `${AI_CONFIG.provider}:${AI_CONFIG.model}`, ...result });
   console.log(`完成：成功 ${result.processed}，失败 ${result.failed}${result.published ? '，已发布' : ''}${result.failed ? '（失败条目下个时段自动重试）' : ''}`);
+}
+
+function appendHistory(entry) {
+  try {
+    fs.mkdirSync(path.join(ROOT, 'local'), { recursive: true });
+    fs.appendFileSync(path.join(ROOT, 'local', 'history.jsonl'), JSON.stringify(entry) + '\n');
+  } catch { /* 历史记录失败不影响主流程 */ }
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

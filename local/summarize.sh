@@ -17,7 +17,7 @@ LOG="$REPO/local/logs/summarize.log"
   if [ -z "$NODE_BIN" ]; then
     echo "未找到 node；请在 local/env 里设置 NODE_BIN=/绝对路径/node"
   else
-    "$NODE_BIN" pipeline/summarize-local.js "$@"
+    "$NODE_BIN" pipeline/summarize-local.js --trigger schedule "$@"
     code=$?
   fi
   echo "===== $(date '+%F %T %z') 结束，退出码 $code ====="

@@ -13,7 +13,7 @@ function workEntry(day, key) {
 }
 
 function makeDeps(overrides = {}) {
-  const calls = { pull: 0, load: 0, archive: 0, summarize: [], checkpoint: [], publish: 0, log: [] };
+  const calls = { pull: 0, load: 0, archive: 0, summarize: [], checkpoint: [], publish: 0, log: [], report: [] };
   const repository = { index: { days: [{ day: '2026-09-04' }] }, dayFiles: new Map([['2026-09-04', dayFile('2026-09-04', [])]]) };
   const deps = {
     pull: async () => { calls.pull++; },
@@ -25,10 +25,36 @@ function makeDeps(overrides = {}) {
     validateAll: () => ({ errors: [] }),
     publish: async ({ changedDays }) => { calls.publish++; calls.publishDays = [...changedDays]; },
     log: (msg) => calls.log.push(msg),
+    report: (patch) => calls.report.push(patch),
     ...overrides,
   };
   return { deps, calls, repository };
 }
+
+test('runSummarizer emits report events for the dashboard', async () => {
+  const { deps, calls } = makeDeps();
+  await runSummarizer(deps);
+
+  const phases = calls.report.map(patch => patch.phase).filter(Boolean);
+  assert.deepEqual(phases, ['archive', 'queue', 'summarize', 'publish', 'done']);
+  const workEvents = calls.report.filter(patch => patch.work);
+  assert.deepEqual(workEvents[0].work, { total: 2, done: 0, failed: 0 });
+  assert.deepEqual(workEvents.at(-1).work, { total: 2, done: 2, failed: 0 });
+  assert.deepEqual(calls.report.at(-1).result, { processed: 2, failed: 0, published: true });
+});
+
+test('runSummarizer reports failures through the work counter and lastError', async () => {
+  const { deps, calls } = makeDeps({
+    summarize: async () => { throw new Error('端点不可用'); },
+  });
+  await runSummarizer(deps);
+
+  const workEvents = calls.report.filter(patch => patch.work);
+  assert.deepEqual(workEvents[0].work, { total: 2, done: 0, failed: 0 });
+  assert.deepEqual(workEvents.at(-1).work, { total: 2, done: 0, failed: 2 });
+  assert.match(calls.report.filter(p => p.lastError).at(-1).lastError, /端点不可用/);
+  assert.equal(calls.report.at(-1).phase, 'done');
+});
 
 test('runSummarizer archives after load, checkpoints archive days, then summarizes and publishes once', async () => {
   const order = [];

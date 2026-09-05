@@ -6,3 +6,6 @@
 # 本地总结的机器相关配置与日志
 local/env
 local/logs/
+local/run-state.json
+local/history.jsonl
+local/trigger-request.json

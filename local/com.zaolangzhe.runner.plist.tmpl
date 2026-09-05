@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- 模板：local/install.sh 会把 __REPO__ / __NODE__ 替换为本机路径后装到 ~/Library/LaunchAgents -->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.zaolangzhe.runner</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/zsh</string>
+    <string>__REPO__/local/runner.sh</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>__REPO__</string>
+
+  <!-- 每 60 秒检查一次面板投递的任务请求 -->
+  <key>StartInterval</key>
+  <integer>60</integer>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>LANG</key>
+    <string>zh_CN.UTF-8</string>
+  </dict>
+
+  <key>StandardOutPath</key>
+  <string>__REPO__/local/logs/runner-launchd.log</string>
+  <key>StandardErrorPath</key>
+  <string>__REPO__/local/logs/runner-launchd.log</string>
+</dict>
+</plist>

@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>造浪者控制台</title>
+<style>
+  :root {
+    --bg: #0f1115; --card: #171a21; --line: #262b36; --text: #e8eaf0;
+    --dim: #8b93a5; --accent: #5d66e8; --ok: #3fb27f; --warn: #e0a13c; --err: #e05c5c;
+  }
+  * { box-sizing: border-box; margin: 0; }
+  body { background: var(--bg); color: var(--text); font-family: -apple-system, "PingFang SC", "Segoe UI", sans-serif; padding: 16px; max-width: 760px; margin: 0 auto; }
+  header { display: flex; align-items: baseline; justify-content: space-between; margin: 8px 0 16px; }
+  h1 { font-size: 20px; }
+  .sync-time { color: var(--dim); font-size: 12px; }
+  .cards { display: grid; gap: 12px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; }
+  .card h2 { font-size: 13px; color: var(--dim); font-weight: 600; margin-bottom: 10px; letter-spacing: 1px; }
+  .row { display: flex; justify-content: space-between; padding: 4px 0; font-size: 14px; }
+  .row .k { color: var(--dim); }
+  .pill { display: inline-block; padding: 2px 10px; border-radius: 999px; font-size: 12px; font-weight: 600; }
+  .pill.run { background: rgba(63,178,127,.15); color: var(--ok); }
+  .pill.idle { background: rgba(139,147,165,.15); color: var(--dim); }
+  .pill.err { background: rgba(224,92,92,.15); color: var(--err); }
+  .progress { background: var(--line); border-radius: 999px; height: 8px; margin: 10px 0 6px; overflow: hidden; }
+  .progress > div { background: var(--accent); height: 100%; border-radius: 999px; transition: width .4s; }
+  .current { font-size: 13px; color: var(--dim); min-height: 18px; }
+  .buttons { display: flex; gap: 8px; margin-top: 12px; }
+  button { flex: 1; padding: 9px 0; border-radius: 8px; border: 1px solid var(--line); background: var(--accent); color: #fff; font-size: 14px; cursor: pointer; }
+  button.secondary { background: transparent; color: var(--text); }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  .models { display: flex; flex-wrap: wrap; gap: 6px; }
+  .model-chip { background: var(--line); padding: 3px 10px; border-radius: 999px; font-size: 12px; }
+  .model-chip.active { background: rgba(93,102,232,.25); color: #aab1ff; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  td { padding: 5px 0; border-top: 1px solid var(--line); }
+  td:first-child { color: var(--dim); }
+  .empty { color: var(--dim); font-size: 13px; padding: 6px 0; }
+  .note { margin-top: 10px; font-size: 12px; color: var(--dim); }
+</style>
+</head>
+<body>
+<header>
+  <h1>造浪者控制台</h1>
+  <span class="sync-time" id="now"></span>
+</header>
+<main class="cards">
+
+  <section class="card">
+    <h2>当前任务</h2>
+    <div class="row"><span class="k">状态</span><span id="task-status" class="pill idle">空闲</span></div>
+    <div class="row"><span class="k">触发方式 / 模型</span><span id="task-meta">—</span></div>
+    <div class="progress"><div id="task-bar" style="width:0%"></div></div>
+    <div class="row"><span class="k">进度</span><span id="task-progress">—</span></div>
+    <div class="current" id="task-current"></div>
+    <div class="row"><span class="k">失败条目</span><span id="task-failed">—</span></div>
+    <div class="buttons">
+      <button id="btn-run">立即跑一轮</button>
+      <button id="btn-retry" class="secondary">重试失败条目</button>
+    </div>
+    <p class="note" id="task-note">按钮投递任务请求，runner 代理会在 1 分钟内启动。</p>
+  </section>
+
+  <section class="card">
+    <h2>数据总览</h2>
+    <div class="row"><span class="k">覆盖天数</span><span id="data-days">—</span></div>
+    <div class="row"><span class="k">内容总数（推文/播客/博客）</span><span id="data-items">—</span></div>
+    <div class="row"><span class="k">缺中文总结</span><span id="data-missing">—</span></div>
+    <div class="row"><span class="k">最新数据日</span><span id="data-newest">—</span></div>
+    <div class="row"><span class="k">与 GitHub 同步</span><span id="git-sync">—</span></div>
+    <div class="row"><span class="k">最近提交</span><span id="git-last">—</span></div>
+  </section>
+
+  <section class="card">
+    <h2>omlx 模型服务</h2>
+    <div class="row"><span class="k">状态</span><span id="omlx-status">—</span></div>
+    <div class="models" id="omlx-models"></div>
+  </section>
+
+  <section class="card">
+    <h2>运行历史（最近 20 次）</h2>
+    <div id="history"><p class="empty">暂无记录</p></div>
+  </section>
+
+</main>
+<script>
+const KINDS = { x: '推文', podcasts: '播客', blogs: '博客' };
+const PHASES = { pull: '同步远端', archive: '归档上游', queue: '准备队列', summarize: '总结中', publish: '发布', done: '完成', failed: '失败', idle: '空闲' };
+const TRIGGERS = { schedule: '⏰ 定时', dashboard: '🖥 面板', manual: '✋ 手动' };
+
+async function refresh() {
+  try {
+    const s = await (await fetch('/api/status')).json();
+    document.getElementById('now').textContent = '刷新于 ' + new Date(s.now).toLocaleTimeString('zh-CN');
+
+    const run = s.run || {};
+    const running = !!run.running;
+    const statusEl = document.getElementById('task-status');
+    if (run.phase === 'failed') { statusEl.className = 'pill err'; statusEl.textContent = '失败'; }
+    else if (running) { statusEl.className = 'pill run'; statusEl.textContent = '运行中 · ' + (PHASES[run.phase] || run.phase); }
+    else { statusEl.className = 'pill idle'; statusEl.textContent = run.phase === 'done' ? '空闲（上次已完成）' : '空闲'; }
+
+    document.getElementById('task-meta').textContent =
+      (TRIGGERS[run.trigger] || run.trigger || '—') + ' · ' + (run.model || '—');
+
+    const w = run.work || {};
+    const pct = w.total ? Math.round(w.done / w.total * 100) : 0;
+    document.getElementById('task-bar').style.width = pct + '%';
+    document.getElementById('task-progress').textContent = w.total ? `${w.done} / ${w.total} 条（${pct}%）` : '—';
+    document.getElementById('task-current').textContent = running && run.current
+      ? '正在处理：' + (KINDS[run.current.kind] || run.current.kind) + ' ' + run.current.key + ' → ' + run.current.day : '';
+    document.getElementById('task-failed').textContent = (w.failed !== undefined ? w.failed : '—') + (run.lastError ? '（最近错误：' + run.lastError + '）' : '');
+
+    for (const id of ['btn-run', 'btn-retry']) document.getElementById(id).disabled = running;
+
+    document.getElementById('data-days').textContent = s.data.days + ' 天';
+    document.getElementById('data-items').textContent = s.data.items + ' 条';
+    const miss = document.getElementById('data-missing');
+    miss.textContent = s.data.missingSummaries + ' 条';
+    miss.style.color = s.data.missingSummaries > 0 ? 'var(--warn)' : 'var(--ok)';
+    document.getElementById('data-newest').textContent = s.data.newestDay || '—';
+    const sync = document.getElementById('git-sync');
+    if (s.git.ahead > 0) { sync.textContent = '本地领先 ' + s.git.ahead + ' 个提交（待推送）'; sync.style.color = 'var(--warn)'; }
+    else if (s.git.behind > 0) { sync.textContent = '落后远端 ' + s.git.behind + ' 个提交'; sync.style.color = 'var(--warn)'; }
+    else { sync.textContent = '已同步 ✓'; sync.style.color = 'var(--ok)'; }
+    document.getElementById('git-last').textContent = s.git.lastCommit || '—';
+
+    const om = document.getElementById('omlx-status');
+    om.textContent = s.omlx.alive ? (s.omlx.reachable ? '运行中 ✓' : '运行中（接口未应答）') : '未运行 ✗';
+    om.style.color = s.omlx.alive ? 'var(--ok)' : 'var(--err)';
+    const models = document.getElementById('omlx-models');
+    models.textContent = '';
+    if (s.omlx.models.length) for (const m of s.omlx.models) {
+      const chip = document.createElement('span');
+      chip.className = 'model-chip';
+      chip.textContent = m;
+      models.appendChild(chip);
+    } else models.appendChild(document.createTextNode('（未探测到可用模型）'));
+
+    const hist = document.getElementById('history');
+    hist.textContent = '';
+    if (!s.history.length) hist.appendChild(Object.assign(document.createElement('p'), { className: 'empty', textContent: '暂无记录' }));
+    for (const h of s.history) {
+      const row = document.createElement('div');
+      row.className = 'row';
+      const left = document.createElement('span');
+      left.className = 'k';
+      left.textContent = (h.startedAt || '').replace('T', ' ').slice(5, 16) + ' · ' + (TRIGGERS[h.trigger] || h.trigger || '');
+      const right = document.createElement('span');
+      right.textContent = h.error ? ('失败：' + h.error.slice(0, 40)) :
+        `成功 ${h.processed ?? 0} · 失败 ${h.failed ?? 0}${h.published ? ' · 已发布' : ''}`;
+      right.style.color = h.error ? 'var(--err)' : 'var(--text)';
+      row.appendChild(left); row.appendChild(right);
+      hist.appendChild(row);
+    }
+    if (s.pendingTrigger) document.getElementById('task-note').textContent =
+      '已投递请求（' + s.pendingTrigger.action + '），runner 将在 1 分钟内启动。';
+  } catch (e) {
+    document.getElementById('task-note').textContent = '面板服务异常：' + e.message;
+  }
+}
+
+async function trigger(action, noteId) {
+  const note = document.getElementById(noteId);
+  note.textContent = '已投递，等待 runner 启动…';
+  try {
+    const res = await fetch('/api/trigger', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action }) });
+    const body = await res.json();
+    if (!res.ok) note.textContent = '触发失败：' + (body.error || res.status);
+  } catch (e) { note.textContent = '触发失败：' + e.message; }
+  setTimeout(refresh, 500);
+}
+
+document.getElementById('btn-run').addEventListener('click', () => trigger('run', 'task-note'));
+document.getElementById('btn-retry').addEventListener('click', () => trigger('retry', 'task-note'));
+refresh();
+setInterval(refresh, 5000);
+</script>
+</body>
+</html>
