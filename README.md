@@ -1,6 +1,6 @@
 # zaolangzhe-data · 造浪者数据归档
 
-[follow-builders](https://github.com/zarazhangrui/follow-builders) 公开聚合数据的分日归档。Actions 每小时抓取上游完整快照并按北京时间批次日写入英文 v3 日分片（公开仓库免费、不消耗 token）；中文总结由本机 launchd 定时任务调用本地模型生成后推送，云端 AI 不再消耗 token。
+[follow-builders](https://github.com/zarazhangrui/follow-builders) 公开聚合数据的分日归档。中文总结只由本机 launchd 定时任务调用本地模型生成后推送；GitHub Actions 仅保留手动触发的英文归档应急通道，不调用 AI。
 
 ## v3 数据契约
 
@@ -39,7 +39,7 @@ data/
 2. **总结**：为缺 `summaryZh` 的条目调用本地模型生成中文总结，逐条原子写盘（分片即检查点，崩溃重跑自动续）。超长内容不做截断：自动识别长度，超出单请求预算（6 万字符）的转录/文章按段落边界分段、逐段提取要点后整合成最终总结（map→reduce）。
 3. **发布**：契约校验通过后一次提交推送 + jsDelivr 刷新。AI 失败不阻塞归档发布——英文数据照常上线，失败条目下个时段自动重试。
 
-云端 Actions 仅保留 `workflow_dispatch` 手动触发作为应急通道（Mac 长期不可用时回填英文），并受单写者守卫约束：最近 26 小时内有"本地中文总结"推送时，云端运行（含手动）自动跳过。
+GitHub Actions 仅保留 `workflow_dispatch` 手动触发作为应急英文归档通道（Mac 长期不可用时回填英文），不调用模型，并受单写者守卫约束：最近 26 小时内有"本地中文总结"推送时，Actions 自动跳过。
 
 ## 造浪者控制台（本地面板）
 
@@ -68,16 +68,22 @@ npm run validate:data
 
 注意仓库位置：**不要把本仓库克隆放进 `~/Documents`、`~/Desktop` 等受 TCC 保护的目录**——launchd 直接派生的进程会被 macOS 隐私保护拒绝访问（Operation not permitted）。家目录下的普通路径（如 `~/zaolangzhe-data`）即可。
 
-## 恢复云端 AI 加工（可选）
+## 本地模型配置
 
-提供者由 `AI_PROVIDER` 决定：默认 `zhipu`（智谱云端，保留专有 thinking 字段，需要密钥）；`openai` 为任意 OpenAI 兼容端点（本地 MLX/LM Studio/Ollama 等，无需密钥），超时与并发可用 `AI_TIMEOUT_MS`、`AI_CONCURRENCY` 覆盖。云端全量补缺（消耗 token，谨慎使用）：
+中文总结只接受本机回环地址上的 OpenAI 兼容服务。`AI_PROVIDER` 必须为 `openai`，`AI_BASE_URL` 必须是 `localhost`、`127.0.0.1` 或 `::1`，不会连接云端模型。`AI_API_KEY` 仅在本机服务要求鉴权时填写；超时与并发可用 `AI_TIMEOUT_MS`、`AI_CONCURRENCY` 覆盖。
 
 ```bash
-AI_PROCESSING_ENABLED=true ZHIPU_API_KEY=可用密钥 \
-  node pipeline/process.js --include-all-missing
+AI_PROVIDER=openai \
+AI_BASE_URL=http://127.0.0.1:8000/v1 \
+AI_MODEL=你的本地模型名 \
+node pipeline/summarize-local.js --include-all-missing
 ```
 
 旧 v1 聚合格式已停止支持。当前 v2 到 v3 的转换由正式管线在内存中自动完成，无需单独运行迁移脚本或本地写数据。
+
+## GitHub Actions 应急英文归档
+
+Mac 长期不可用时，可手动回填英文快照；该流程不调用模型，也不生成中文总结：
 
 ```bash
 gh workflow run pipeline.yml --repo WYgao29/zaolangzhe-data --ref main -f backfill_days=0

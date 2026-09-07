@@ -67,26 +67,28 @@ async function fetchFeed(file, ref = 'main', fetchImpl) {
   throw lastError;
 }
 
-/* ---------- AI 客户端（提供者无关） ----------
- * zhipu：智谱云端 API（默认，含专有 thinking 字段，需要密钥）。
- * openai：任意 OpenAI 兼容端点（本地 MLX/LM Studio/Ollama 等，无需密钥）。
+/* ---------- 本地 AI 客户端 ----------
+ * 仅连接本机的 OpenAI 兼容端点（oMLX/MLX/LM Studio/Ollama 等）。
  * 凭据一律从环境变量读取，源码与配置文件不写密钥。 */
 export function resolveAIConfig(env = process.env) {
-  const provider = String(env.AI_PROVIDER || 'zhipu').trim().toLowerCase() || 'zhipu';
-  if (provider !== 'zhipu' && provider !== 'openai') {
-    throw new Error(`未知 AI_PROVIDER：${provider}（可选 zhipu / openai）`);
+  const provider = String(env.AI_PROVIDER || 'openai').trim().toLowerCase() || 'openai';
+  if (provider !== 'openai') {
+    throw new Error(`仅支持本地 OpenAI 兼容端点：AI_PROVIDER 必须为 openai（收到 ${provider}）`);
   }
-  let baseURL = '';
-  if (provider === 'zhipu') {
-    baseURL = 'https://open.bigmodel.cn/api/paas/v4';
-  } else {
-    baseURL = String(env.AI_BASE_URL || '').trim().replace(/\/+$/, '');
-    if (!baseURL) throw new Error('AI_PROVIDER=openai 需要设置 AI_BASE_URL（本地 OpenAI 兼容端点）');
-    if (!/^https?:\/\//i.test(baseURL)) throw new Error(`AI_BASE_URL 必须是 http/https：${baseURL}`);
+  const baseURL = String(env.AI_BASE_URL || '').trim().replace(/\/+$/, '');
+  if (!baseURL) throw new Error('本地模型需要设置 AI_BASE_URL');
+  let parsedURL;
+  try { parsedURL = new URL(baseURL); }
+  catch { throw new Error(`AI_BASE_URL 必须是有效的 http/https 地址：${baseURL}`); }
+  if (!/^https?:$/.test(parsedURL.protocol)) {
+    throw new Error(`AI_BASE_URL 必须是 http/https：${baseURL}`);
   }
-  const model = String(env.AI_MODEL || (provider === 'zhipu' ? env.ZHIPU_MODEL : '') || (provider === 'zhipu' ? 'glm-5.3-flash' : '')).trim();
-  if (!model) throw new Error('AI_PROVIDER=openai 需要设置 AI_MODEL（本地模型名）');
-  const apiKey = String(env.AI_API_KEY || (provider === 'zhipu' ? env.ZHIPU_API_KEY : '') || '');
+  if (!['127.0.0.1', 'localhost', '[::1]'].includes(parsedURL.hostname)) {
+    throw new Error(`AI_BASE_URL 必须指向本机回环地址：${baseURL}`);
+  }
+  const model = String(env.AI_MODEL || '').trim();
+  if (!model) throw new Error('本地模型需要设置 AI_MODEL');
+  const apiKey = String(env.AI_API_KEY || '');
   const parsePositive = (raw, fallback) => {
     const value = Number(raw);
     return Number.isFinite(value) && value > 0 ? value : fallback;
@@ -97,8 +99,8 @@ export function resolveAIConfig(env = process.env) {
     baseURL,
     model,
     apiKey,
-    needsKey: provider === 'zhipu',
-    bodyExtras: provider === 'zhipu' ? { thinking: { type: 'enabled', length: 'low' } } : {},
+    needsKey: false,
+    bodyExtras: {},
     timeoutMs: parsePositive(env.AI_TIMEOUT_MS, 180000),
     concurrency: Number.isFinite(rawConcurrency) ? Math.max(1, rawConcurrency) : 2,
   };
@@ -326,7 +328,8 @@ export async function purge(paths) {
 }
 
 export async function main() {
-  const AI_CONFIG = resolveAIConfig(process.env);
+  // 未开启 AI 时只做英文归档；不能因为没有本地模型配置而阻断应急归档。
+  const AI_CONFIG = AI_MODE.enabled ? resolveAIConfig(process.env) : null;
   console.log(`造浪者 v3 管线 · ${AI_MODE.enabled ? `AI ${AI_CONFIG.provider}:${AI_CONFIG.model}` : '纯英文'} · 回溯上游 ${BACKFILL_DAYS} 天 · ${DRY_RUN ? 'DRY-RUN' : '正式'}`);
   const repository = loadRepository(ROOT, { migrateV2: true, requireAllSummaries: false });
   const archive = await archiveUpstreamSnapshots(repository, { backfillDays: BACKFILL_DAYS });
@@ -347,24 +350,24 @@ export async function main() {
     console.log(`dry-run 结束：仓库警告 ${repository.warnings.length}，未调用 AI、未写文件。`);
     return;
   }
-  if (work.length && AI_CONFIG.needsKey && !AI_CONFIG.apiKey) throw new Error('缺少 ZHIPU_API_KEY');
-
   let done = 0;
   let failed = 0;
-  const aiCall = createAIClient(AI_CONFIG);
-  for (let offset = 0; offset < work.length; offset += AI_CONFIG.concurrency) {
-    const chunk = work.slice(offset, offset + AI_CONFIG.concurrency);
-    await Promise.all(chunk.map(async entry => {
-      try {
-        await PROCESSORS[entry.kind](entry.item, aiCall);
-        done++;
-        changedDays.add(entry.day);
-        console.log(`  ✓ [${done}/${work.length}] ${entry.kind} ${entry.key}`);
-      } catch (error) {
-        failed++;
-        console.log(`  ✗ ${entry.kind} ${entry.key}：${error.message}`);
-      }
-    }));
+  if (AI_MODE.enabled) {
+    const aiCall = createAIClient(AI_CONFIG);
+    for (let offset = 0; offset < work.length; offset += AI_CONFIG.concurrency) {
+      const chunk = work.slice(offset, offset + AI_CONFIG.concurrency);
+      await Promise.all(chunk.map(async entry => {
+        try {
+          await PROCESSORS[entry.kind](entry.item, aiCall);
+          done++;
+          changedDays.add(entry.day);
+          console.log(`  ✓ [${done}/${work.length}] ${entry.kind} ${entry.key}`);
+        } catch (error) {
+          failed++;
+          console.log(`  ✗ ${entry.kind} ${entry.key}：${error.message}`);
+        }
+      }));
+    }
   }
 
   if (failed) throw new Error(`仍有 ${failed} 条 AI 加工失败`);
