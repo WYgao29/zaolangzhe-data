@@ -92,7 +92,7 @@ const TRIGGERS = { schedule: '⏰ 定时', dashboard: '🖥 面板', manual: '�
 async function refresh() {
   try {
     const s = await (await fetch('/api/status')).json();
-    document.getElementById('now').textContent = '刷新于 ' + new Date(s.now).toLocaleTimeString('zh-CN');
+    document.getElementById('now').textContent = '刷新于 ' + (s.nowBeijing || '—');
 
     const run = s.run || {};
     const running = !!run.running;
@@ -146,7 +146,7 @@ async function refresh() {
       row.className = 'row';
       const left = document.createElement('span');
       left.className = 'k';
-      left.textContent = (h.startedAt || '').replace('T', ' ').slice(5, 16) + ' · ' + (TRIGGERS[h.trigger] || h.trigger || '');
+      left.textContent = (h.startedAtBeijing || '—') + ' · ' + (TRIGGERS[h.trigger] || h.trigger || '');
       const right = document.createElement('span');
       right.textContent = h.error ? ('失败：' + h.error.slice(0, 40)) :
         `成功 ${h.processed ?? 0} · 失败 ${h.failed ?? 0}${h.published ? ' · 已发布' : ''}`;

@@ -18,6 +18,26 @@ import { promisify } from 'node:util';
 const execFileAsync = promisify(execFile);
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.join(HERE, '..');
+const BEIJING_TIME_ZONE = 'Asia/Shanghai';
+
+export function formatBeijingDateTime(value, { seconds = false } = {}) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return '—';
+  const options = {
+    timeZone: BEIJING_TIME_ZONE,
+    month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit',
+    hourCycle: 'h23',
+  };
+  if (seconds) options.second = '2-digit';
+  const parts = Object.fromEntries(
+    new Intl.DateTimeFormat('en-CA', options)
+      .formatToParts(date)
+      .filter(part => ['month', 'day', 'hour', 'minute', 'second'].includes(part.type))
+      .map(part => [part.type, part.value]),
+  );
+  if (!parts.month || !parts.day || !parts.hour || !parts.minute || (seconds && !parts.second)) return '—';
+  return `${parts.month}-${parts.day} ${parts.hour}:${parts.minute}${seconds ? `:${parts.second}` : ''}`;
+}
 
 function readEnvFile(envPath) {
   const env = {};
@@ -58,6 +78,7 @@ function readHistory(root, limit = 20) {
     return fs.readFileSync(path.join(root, 'local', 'history.jsonl'), 'utf8')
       .trim().split('\n').filter(Boolean).slice(-limit)
       .map(line => { try { return JSON.parse(line); } catch { return { line }; } })
+      .map(entry => entry.startedAt ? { ...entry, startedAtBeijing: formatBeijingDateTime(entry.startedAt) } : entry)
       .reverse();
   } catch { return []; }
 }
@@ -102,6 +123,7 @@ export function createDashboardServer(deps = {}) {
     const env = readEnvFile(envPath);
     const baseUrl = env.AI_BASE_URL || '';
     const apiKey = env.AI_API_KEY || '';
+    const currentTime = now();
     const [git, omlx] = await Promise.all([
       gitStatus(root, gitImpl),
       deps.omlxProbe
@@ -109,7 +131,8 @@ export function createDashboardServer(deps = {}) {
         : baseUrl ? omlxStatus(baseUrl, apiKey) : Promise.resolve({ alive: false, models: [] }),
     ]);
     return {
-      now: now(),
+      now: currentTime,
+      nowBeijing: formatBeijingDateTime(currentTime, { seconds: true }),
       run: readJSON(path.join(root, 'local', 'run-state.json')) || { running: false, phase: 'idle' },
       data: scanData(root),
       git,

@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-import { createDashboardServer, omlxStatus } from '../local/dashboard.js';
+import { createDashboardServer, formatBeijingDateTime, omlxStatus } from '../local/dashboard.js';
 
 function fixtureRoot() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'zaolangzhe-dash-'));
@@ -24,6 +24,31 @@ function startServer(deps) {
     server.listen(0, '127.0.0.1', () => resolve({ server, port: server.address().port }));
   });
 }
+
+test('formats dashboard timestamps in Beijing time instead of displaying UTC ISO text', () => {
+  assert.equal(formatBeijingDateTime('2026-09-07T03:05:28.253Z'), '09-07 11:05');
+  assert.equal(formatBeijingDateTime('2026-09-07T03:05:28.253Z', { seconds: true }), '09-07 11:05:28');
+});
+
+test('dashboard status exposes Beijing display timestamps and the page consumes them', async () => {
+  const root = fixtureRoot();
+  fs.writeFileSync(path.join(root, 'local', 'history.jsonl'), JSON.stringify({ startedAt: '2026-09-07T03:05:28.253Z', processed: 0 }) + '\n');
+  const { server, port } = await startServer({
+    root,
+    now: () => '2026-09-07T03:05:28.253Z',
+    gitImpl: async () => '',
+    omlxProbe: async () => ({ alive: true, models: [] }),
+  });
+  try {
+    const status = await (await fetch(`http://127.0.0.1:${port}/api/status`)).json();
+    assert.equal(status.nowBeijing, '09-07 11:05:28');
+    assert.equal(status.history[0].startedAtBeijing, '09-07 11:05');
+    const html = await (await fetch(`http://127.0.0.1:${port}/`)).text();
+    assert.match(html, /s\.nowBeijing/);
+    assert.match(html, /h\.startedAtBeijing/);
+    assert.doesNotMatch(html, /\(h\.startedAt \|\| ''\)\.replace/);
+  } finally { server.close(); }
+});
 
 test('/api/status aggregates run state, data inventory, git and omlx status', async () => {
   const root = fixtureRoot();
