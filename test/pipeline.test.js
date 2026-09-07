@@ -245,7 +245,12 @@ test('archiveUpstreamSnapshots replays historical snapshots and merges upstream 
     text: async () => '',
   });
 
-  const result = await archiveUpstreamSnapshots(repository, { backfillDays: 2, fetchImpl, log: () => {} });
+  const result = await archiveUpstreamSnapshots(repository, {
+    backfillDays: 2,
+    now: Date.parse('2026-09-05T10:00:00Z'),
+    fetchImpl,
+    log: () => {},
+  });
 
   assert.equal(result.fetched, 1);
   assert.equal(result.addedKeys.has('x:t1'), true);
@@ -255,6 +260,67 @@ test('archiveUpstreamSnapshots replays historical snapshots and merges upstream 
   assert.equal(day.x[0].id, 't1');
   assert.equal(day.x[0].handle, 'a', 'flattenSnapshot 需回填构建者信息');
   assert.equal(day.schemaVersion, 3);
+});
+
+test('archiveUpstreamSnapshots uses the Beijing calendar boundary for replay windows', async () => {
+  const repository = { dayFiles: new Map() };
+  const fetchImpl = async (url) => ({
+    ok: true,
+    status: 200,
+    json: async () => {
+      if (url.includes('api.github.com')) {
+        return [{ sha: 'calendar-boundary', commit: { author: { date: '2026-09-05T06:36:35Z' } } }];
+      }
+      if (url.endsWith('feed-x.json')) {
+        return { generatedAt: '2026-09-05T06:36:35Z', x: [{ handle: 'a', name: 'A', bio: '', tweets: [{ id: 'calendar-item', text: 'hello', createdAt: '2026-09-05T06:00:00Z', url: 'https://x.com/a/status/calendar-item', handle: 'a' }] }] };
+      }
+      if (url.endsWith('feed-podcasts.json')) return { generatedAt: '2026-09-05T06:36:35Z', podcasts: [] };
+      return { generatedAt: '2026-09-05T06:36:35Z', blogs: [] };
+    },
+    text: async () => '',
+  });
+
+  const result = await archiveUpstreamSnapshots(repository, {
+    backfillDays: 1,
+    now: Date.parse('2026-09-06T07:40:00Z'), // 北京 09-06 15:40；回放边界应为北京 09-05 00:00
+    fetchImpl,
+    log: () => {},
+  });
+
+  assert.equal(result.fetched, 1);
+  assert.equal(result.addedKeys.has('x:calendar-item'), true);
+  assert.equal(result.changedDays.has('2026-09-05'), true);
+});
+
+test('archiveUpstreamSnapshots falls back to main when no commit is inside the replay window', async () => {
+  const stable = tweet('stable');
+  const repository = { dayFiles: new Map([['2026-09-06', dayFile('2026-09-06', { generatedAt: '2026-09-06T01:00:00Z', x: [stable] })]]) };
+  const fetchImpl = async (url) => ({
+    ok: true,
+    status: 200,
+    json: async () => {
+      if (url.includes('api.github.com')) {
+        return [{ sha: 'too-old', commit: { author: { date: '2026-09-01T00:00:00Z' } } }];
+      }
+      if (url.endsWith('feed-x.json')) {
+        return { generatedAt: '2026-09-06T01:00:00Z', x: [{ handle: 'a', name: 'A', bio: '', tweets: [stable] }] };
+      }
+      if (url.endsWith('feed-podcasts.json')) return { generatedAt: '2026-09-06T01:00:00Z', podcasts: [] };
+      return { generatedAt: '2026-09-06T01:00:00Z', blogs: [] };
+    },
+    text: async () => '',
+  });
+
+  const result = await archiveUpstreamSnapshots(repository, {
+    backfillDays: 1,
+    now: Date.parse('2026-09-06T07:40:00Z'),
+    fetchImpl,
+    log: () => {},
+  });
+
+  assert.equal(result.fetched, 1, '没有新提交也应把 main 当作一次正常 no-op 快照');
+  assert.equal(result.addedKeys.size, 0);
+  assert.equal(result.changedDays.size, 0);
 });
 
 test('splitIntoChunks splits long text at paragraph boundaries with a hard cap', async () => {

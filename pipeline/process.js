@@ -271,20 +271,23 @@ function flattenSnapshot(feed, batchDay) {
   };
 }
 
-async function collectUpstreamSnapshots(backfillDays, fetchImpl) {
-  if (!backfillDays) return [{ ref: 'main', ms: Date.now() }];
+async function collectUpstreamSnapshots(backfillDays, fetchImpl, now = Date.now()) {
+  if (!backfillDays) return [{ ref: 'main', ms: now }];
   const commits = await fetchJSON(`${API_COMMITS}?path=${FEEDS.x}&per_page=100`, { headers: { Accept: 'application/vnd.github+json' } }, fetchImpl);
-  const cutoff = Date.now() - backfillDays * DAY;
-  return commits
+  const todayStart = Date.parse(`${beijingDay(now)}T00:00:00+08:00`);
+  const cutoff = todayStart - backfillDays * DAY;
+  const snapshots = commits
     .map(commit => ({ ref: commit.sha, ms: Date.parse(commit.commit?.author?.date || '') }))
     .filter(snapshot => snapshot.ref && Number.isFinite(snapshot.ms) && snapshot.ms >= cutoff)
     .reverse();
+  // GitHub 没有新提交时，当前 main 仍是一个合法的 no-op 快照；不能把“无新增”当成管线故障。
+  return snapshots.length ? snapshots : [{ ref: 'main', ms: now }];
 }
 
 /* 归档上游：拉取快照（backfillDays>0 时回放历史提交）并合并进 dayFiles。
  * 云端 process.js 与本地 summarize-local 共用这一段合并语义。 */
-export async function archiveUpstreamSnapshots(repository, { backfillDays = 0, fetchImpl, log = console.log } = {}) {
-  const snapshots = await collectUpstreamSnapshots(backfillDays, fetchImpl);
+export async function archiveUpstreamSnapshots(repository, { backfillDays = 0, now = Date.now(), fetchImpl, log = console.log } = {}) {
+  const snapshots = await collectUpstreamSnapshots(backfillDays, fetchImpl, now);
   const addedKeys = new Set();
   const changedDays = new Set();
   let duplicateCount = 0;

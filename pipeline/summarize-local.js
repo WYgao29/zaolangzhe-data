@@ -73,11 +73,17 @@ export function capReplayDays(gapDays, max = MAX_REPLAY_DAYS) {
   return Math.max(0, Math.min(Math.round(gapDays) || 0, max));
 }
 
+export function computeReplayDays(newestDay, now = Date.now()) {
+  return capReplayDays(computeBackfillDays(newestDay, now));
+}
+
 /* 核心循环：依赖全部注入，便于测试。
  * 编排顺序：pull → 归档（含检查点）→ 建队列 → 逐条总结（含检查点）→ 校验 → 发布。
  * AI 失败只计数、不抛出——已成功内容与归档照常发布，失败条目下个时段自动重试。 */
 export async function runSummarizer({
-  pull, loadRepo, archive, buildQueue, summarize, checkpoint, validateAll, publish, report = () => {}, log = () => {},
+  pull, loadRepo, archive, buildQueue, summarize, checkpoint, validateAll, publish,
+  hasPendingCommits = async () => false,
+  report = () => {}, log = () => {},
 }) {
   await pull();
   const repository = await loadRepo();
@@ -125,8 +131,9 @@ export async function runSummarizer({
 
   report({ phase: 'publish' });
   let published = false;
-  if (changedDays.size) {
-    await publish({ changedDays });
+  const pendingCommit = !changedDays.size && await hasPendingCommits();
+  if (changedDays.size || pendingCommit) {
+    await publish({ changedDays, pendingCommit });
     published = true;
   } else {
     log('没有需要发布的变化，结束');
@@ -141,6 +148,11 @@ async function git(root, gitArgs, { timeout = 120000 } = {}) {
   return stdout;
 }
 
+export async function hasUnpushedCommits(root, { gitImpl = git } = {}) {
+  const raw = await gitImpl(root, ['rev-list', '--count', 'origin/main..HEAD']);
+  return Number.parseInt(String(raw).trim(), 10) > 0;
+}
+
 export async function pushWithRetry(root, { attempts = 3, log = console.log } = {}) {
   for (let attempt = 1; attempt <= attempts; attempt++) {
     try {
@@ -153,6 +165,49 @@ export async function pushWithRetry(root, { attempts = 3, log = console.log } = 
       await sleep(2000);
     }
   }
+}
+
+function dataPathsFromGitDiff(output) {
+  return String(output || '')
+    .split(/\r?\n/)
+    .map(value => value.trim())
+    .filter(value => value.startsWith('data/'));
+}
+
+export async function publishData(root, {
+  changedDays = new Set(),
+  gitImpl = git,
+  pushImpl = pushWithRetry,
+  purgeImpl = purge,
+  log = console.log,
+  commitDate = new Date(),
+} = {}) {
+  const status = await gitImpl(root, ['status', '--porcelain', '--', 'data']);
+  const hasDataChanges = Boolean(String(status).trim());
+  if (hasDataChanges) {
+    await gitImpl(root, ['add', 'data']);
+    await gitImpl(root, ['commit', '-m', `本地中文总结 ${commitDate.toISOString().slice(0, 10)}`]);
+  }
+
+  const aheadRaw = await gitImpl(root, ['rev-list', '--count', 'origin/main..HEAD']);
+  const ahead = Number.parseInt(String(aheadRaw).trim(), 10) || 0;
+  if (!hasDataChanges && ahead <= 0) {
+    log('无新增内容，跳过提交');
+    return { pushed: false, purged: false };
+  }
+
+  // 在 push 前收集路径；push 成功后 origin/main 会移动，届时 diff 会变空。
+  const pendingPaths = ahead > 0
+    ? dataPathsFromGitDiff(await gitImpl(root, ['diff', '--name-only', 'origin/main..HEAD', '--', 'data']))
+    : [];
+  const paths = new Set(['data/index.json']);
+  for (const day of changedDays) paths.add(`data/days/${day}.json`);
+  for (const value of pendingPaths) paths.add(value);
+
+  await pushImpl(root);
+  log('已推送 GitHub');
+  await purgeImpl([...paths]);
+  return { pushed: true, purged: true };
 }
 
 export async function main(runtimeArgs = args) {
@@ -194,9 +249,12 @@ export async function main(runtimeArgs = args) {
       archive: async (repository) => {
         if (dryRun) return { addedKeys: new Set(), changedDays: new Set(), duplicates: 0, fetched: 0 };
         const newestDay = repository.index?.days?.[0]?.day || '';
-        const backfillDays = computeBackfillDays(newestDay, Date.now());
-        if (backfillDays > 0) console.log(`检测到数据缺口 ${backfillDays} 天，自动回放上游历史快照`);
-        return archiveUpstreamSnapshots(repository, { backfillDays });
+        const now = Date.now();
+        const rawBackfillDays = computeBackfillDays(newestDay, now);
+        const backfillDays = capReplayDays(rawBackfillDays);
+        if (rawBackfillDays > backfillDays) console.log(`检测到数据缺口 ${rawBackfillDays} 天，本轮最多回放 ${backfillDays} 天`);
+        else if (backfillDays > 0) console.log(`检测到数据缺口 ${backfillDays} 天，自动回放上游历史快照`);
+        return archiveUpstreamSnapshots(repository, { backfillDays, now });
       },
       buildQueue: (repository) => buildWorkQueue(repository.dayFiles, {
         now: Date.now(), aiEnabled: true, includeAllMissing: INCLUDE_ALL, recentDays: RECENT_DAYS,
@@ -214,15 +272,10 @@ export async function main(runtimeArgs = args) {
         repository.dayFiles,
         { requireAllSummaries: false }, // 解耦：缺总结只是警告，不得阻塞归档发布
       ),
+      hasPendingCommits: async () => hasUnpushedCommits(ROOT),
       publish: async ({ changedDays }) => {
         if (dryRun) return console.log(`DRY-RUN：将更新 ${changedDays.size} 天，不提交推送`);
-        const status = await git(ROOT, ['status', '--porcelain', '--', 'data']);
-        if (!status.trim()) return console.log('无新增内容，跳过提交');
-        await git(ROOT, ['add', 'data']);
-        await git(ROOT, ['commit', '-m', `本地中文总结 ${new Date().toISOString().slice(0, 10)}`]);
-        await pushWithRetry(ROOT);
-        console.log('已推送 GitHub');
-        await purge(['data/index.json', ...[...changedDays].map(day => `data/days/${day}.json`)]);
+        await publishData(ROOT, { changedDays });
       },
     });
   } catch (error) {

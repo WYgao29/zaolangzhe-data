@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { capReplayDays, computeBackfillDays, runSummarizer } from '../pipeline/summarize-local.js';
+import { capReplayDays, computeBackfillDays, computeReplayDays, publishData, runSummarizer } from '../pipeline/summarize-local.js';
 import { isRunActive } from '../pipeline/run-state.js';
 import { buildWorkQueue } from '../pipeline/storage.js';
 
@@ -100,6 +100,17 @@ test('runSummarizer skips publishing when nothing changed at all', async () => {
   assert.deepEqual(result, { processed: 0, failed: 0, published: false });
 });
 
+test('runSummarizer retries a pending local commit when the current run has no data changes', async () => {
+  const { deps, calls } = makeDeps({
+    buildQueue: () => ({ work: [], newCount: 0, selfHealCount: 0 }),
+    hasPendingCommits: async () => true,
+  });
+  const result = await runSummarizer(deps);
+
+  assert.equal(calls.publish, 1, '上次 push 失败留下的本地提交必须在下一轮重试');
+  assert.equal(result.published, true);
+});
+
 test('runSummarizer keeps publishing when AI items fail — summaries retry next run', async () => {
   const { deps, calls } = makeDeps({
     summarize: async (entry) => {
@@ -160,6 +171,38 @@ test('capReplayDays bounds a single replay to 14 days and never goes negative', 
   assert.equal(capReplayDays(15), 14, '超过 14 天按 14 天封顶，剩余分批追赶');
   assert.equal(capReplayDays(300), 14);
   assert.equal(capReplayDays(-5), 0);
+});
+
+test('computeReplayDays applies the 14-day cap to the production replay window', () => {
+  const now = Date.parse('2026-09-07T10:00:00Z');
+  assert.equal(computeReplayDays('2026-08-01', now), 14);
+  assert.equal(computeReplayDays('2026-09-06', now), 1);
+});
+
+test('publishData pushes an existing local commit even when data is already clean', async () => {
+  const gitCalls = [];
+  let pushes = 0;
+  let purged = [];
+  const gitImpl = async (_root, gitArgs) => {
+    gitCalls.push(gitArgs);
+    if (gitArgs[0] === 'status') return '';
+    if (gitArgs[0] === 'rev-list') return '1\n';
+    if (gitArgs[0] === 'diff') return 'data/index.json\ndata/days/2026-09-07.json\n';
+    return '';
+  };
+
+  const result = await publishData('/tmp/zaolangzhe-test', {
+    changedDays: new Set(),
+    gitImpl,
+    pushImpl: async () => { pushes++; },
+    purgeImpl: async (paths) => { purged = paths; },
+    log: () => {},
+  });
+
+  assert.equal(result.pushed, true);
+  assert.equal(pushes, 1);
+  assert.deepEqual(purged, ['data/index.json', 'data/days/2026-09-07.json']);
+  assert.equal(gitCalls.some(args => args[0] === 'commit'), false, '干净工作树不应重复提交');
 });
 
 test('isRunActive treats a fresh running state as active, a stale one as inactive', () => {

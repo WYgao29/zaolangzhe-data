@@ -15,6 +15,7 @@ fi
 # launchd 环境没有用户 PATH，把 node 绝对路径写进 local/env（不影响其他键）
 touch "$REPO/local/env"
 grep -q '^NODE_BIN=' "$REPO/local/env" || echo "NODE_BIN=$NODE_BIN" >> "$REPO/local/env"
+chmod 600 "$REPO/local/env"
 
 mkdir -p "$REPO/local/logs" "$HOME/Library/LaunchAgents"
 chmod +x "$REPO/local/summarize.sh" "$REPO/local/runner.sh" 2>/dev/null || true
