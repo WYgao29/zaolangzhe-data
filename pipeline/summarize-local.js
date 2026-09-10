@@ -82,7 +82,7 @@ export function computeReplayDays(newestDay, now = Date.now()) {
  * AI 失败只计数、不抛出——已成功内容与归档照常发布，失败条目下个时段自动重试。 */
 export async function runSummarizer({
   pull, loadRepo, archive, buildQueue, summarize, checkpoint, validateAll, publish,
-  hasPendingCommits = async () => false,
+  hasPendingCommits = async () => false, concurrency = 1,
   report = () => {}, log = () => {},
 }) {
   await pull();
@@ -105,25 +105,31 @@ export async function runSummarizer({
 
   let processed = 0;
   let failed = 0;
-  for (const entry of queue.work) {
-    const startedAt = Date.now();
-    report({ current: { kind: entry.kind, key: entry.key, day: entry.day } });
-    try {
-      await summarize(entry);
-      changedDays.add(entry.day);
-      processed++;
-      work.done++;
-      await checkpoint(repository, new Set([entry.day]));
-      report({ work: { ...work }, current: { kind: entry.kind, key: entry.key, day: entry.day } });
-      const seconds = ((Date.now() - startedAt) / 1000).toFixed(1);
-      log(`  ✓ ${entry.kind} ${entry.key} → ${entry.day} · ${seconds}s`);
-    } catch (error) {
-      failed++;
-      work.failed++;
-      report({ work: { ...work }, current: { kind: entry.kind, key: entry.key, day: entry.day }, lastError: error.message });
-      const seconds = ((Date.now() - startedAt) / 1000).toFixed(1);
-      log(`  ✗ ${entry.kind} ${entry.key}（${seconds}s）：${error.message}`);
-    }
+  const batchSize = Math.max(1, Math.floor(Number(concurrency)) || 1);
+  for (let offset = 0; offset < queue.work.length; offset += batchSize) {
+    const batch = queue.work.slice(offset, offset + batchSize);
+    const succeededDays = new Set();
+    await Promise.all(batch.map(async entry => {
+      const startedAt = Date.now();
+      report({ current: { kind: entry.kind, key: entry.key, day: entry.day } });
+      try {
+        await summarize(entry);
+        changedDays.add(entry.day);
+        succeededDays.add(entry.day);
+        processed++;
+        work.done++;
+        report({ work: { ...work }, current: { kind: entry.kind, key: entry.key, day: entry.day } });
+        const seconds = ((Date.now() - startedAt) / 1000).toFixed(1);
+        log(`  ✓ ${entry.kind} ${entry.key} → ${entry.day} · ${seconds}s`);
+      } catch (error) {
+        failed++;
+        work.failed++;
+        report({ work: { ...work }, current: { kind: entry.kind, key: entry.key, day: entry.day }, lastError: error.message });
+        const seconds = ((Date.now() - startedAt) / 1000).toFixed(1);
+        log(`  ✗ ${entry.kind} ${entry.key}（${seconds}s）：${error.message}`);
+      }
+    }));
+    if (succeededDays.size) await checkpoint(repository, succeededDays);
   }
 
   const validation = validateAll(repository);
@@ -254,6 +260,7 @@ export async function main(runtimeArgs = args) {
       buildQueue: (repository) => buildWorkQueue(repository.dayFiles, {
         now: Date.now(), aiEnabled: true, includeAllMissing: INCLUDE_ALL, recentDays: RECENT_DAYS,
       }),
+      concurrency: AI_CONFIG.concurrency,
       summarize: async (entry) => {
         if (dryRun) return; // 预览队列即可，不调用模型、不改动数据
         await PROCESSORS[entry.kind](entry.item, createAIClient(AI_CONFIG));
