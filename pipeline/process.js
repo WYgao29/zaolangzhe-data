@@ -114,12 +114,13 @@ export function createAIClient(config, { fetchImpl = fetch, sleepMs = 3000 } = {
   const headers = { 'Content-Type': 'application/json' };
   if (config.apiKey) headers.Authorization = 'Bearer ' + config.apiKey;
   const wait = (ms) => new Promise(resolve => setTimeout(resolve, ms));
-  return async function ai(messages, { maxTokens = 8192, timeout } = {}) {
+  return async function ai(messages, { maxTokens = 8192, timeout, bodyExtras = {} } = {}) {
     const body = JSON.stringify({
       model: config.model,
       temperature: 0.3,
       max_tokens: maxTokens,
       ...config.bodyExtras,
+      ...bodyExtras,
       messages,
     });
     const once = async () => {
@@ -197,7 +198,7 @@ const CHUNK_PROMPTS = {
   },
 };
 
-async function summarizeLongText(kind, text, aiCall, label) {
+async function summarizeLongText(kind, text, aiCall, label, requestOptions = {}) {
   const chunks = splitIntoChunks(text);
   if (chunks.length === 1) return null; // 单请求路径由调用方处理
   const prompts = CHUNK_PROMPTS[kind];
@@ -206,29 +207,34 @@ async function summarizeLongText(kind, text, aiCall, label) {
     partials.push(requireAIText(await aiCall([
       { role: 'system', content: prompts.map },
       { role: 'user', content: `（第 ${i + 1}/${chunks.length} 段）\n${chunks[i]}` },
-    ]), `${label}分段要点 ${i + 1}`));
+    ], requestOptions), `${label}分段要点 ${i + 1}`));
   }
   const reduceUser = partials.map((part, i) => `【第 ${i + 1} 段要点】\n${part}`).join('\n\n');
   if (prompts.reduceJSON) {
     const parsed = parseJSONLoose(await aiCall([
       { role: 'system', content: prompts.reduce },
       { role: 'user', content: reduceUser },
-    ]));
+    ], requestOptions));
     return requireAIText(parsed.summaryZh, label);
   }
   return requireAIText(await aiCall([
     { role: 'system', content: prompts.reduce },
     { role: 'user', content: reduceUser },
-  ]), label);
+  ], requestOptions), label);
 }
 
+const X_TRANSLATION_REQUEST = {
+  maxTokens: 2048,
+  bodyExtras: { chat_template_kwargs: { enable_thinking: false } },
+};
+
 export async function processTweet(item, aiCall = ai) {
-  const long = await summarizeLongText('x', item.text, aiCall, '推文译文');
+  const long = await summarizeLongText('x', item.text, aiCall, '推文译文', X_TRANSLATION_REQUEST);
   if (long !== null) { item.textZh = long; delete item.summaryZh; return; }
   item.textZh = requireAIText(await aiCall([
     { role: 'system', content: '你是专业的科技翻译。将英文推文完整翻译成简体中文：准确、自然，保留原有换行、@提及、链接、话题标签、产品名、专有名词和数字；只输出译文，不要总结、解释或加引号。' },
     { role: 'user', content: item.text },
-  ]), '推文译文');
+  ], X_TRANSLATION_REQUEST), '推文译文');
   delete item.summaryZh;
 }
 
