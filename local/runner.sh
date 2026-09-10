@@ -13,11 +13,18 @@ NODE_BIN="${NODE_BIN:-$(command -v node || true)}"
 REQ="$REPO/local/trigger-request.json"
 [ -f "$REQ" ] || exit 0
 
+mkdir -p local/logs
+
+# 先同步代码，再启动 Node。否则 Node 会先加载旧版 contract.js，
+# 随后的进程内 git pull 又可能把新版 data 拉进来，造成版本错配。
+if git rev-parse --is-inside-work-tree >/dev/null 2>&1 && ! git pull --rebase --autostash >> local/logs/runner.log 2>&1; then
+  echo "===== $(date '+%F %T %z') runner 同步失败，本次不启动本地任务 =====" >> local/logs/runner.log
+  exit 1
+fi
+
 ACTION=$("$NODE_BIN" -e 'try{console.log(JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).action||"run")}catch(e){console.log("run")}' "$REQ" 2>/dev/null || echo run)
 case "$ACTION" in run|retry) ;; *) ACTION="run" ;; esac
 rm -f "$REQ"
-
-mkdir -p local/logs
 
 ARGS="--trigger dashboard"
 [ "$ACTION" = "retry" ] && ARGS="$ARGS --include-all-missing"
