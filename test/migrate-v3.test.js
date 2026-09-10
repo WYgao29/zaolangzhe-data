@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 
 import { migrateDayFileToV3 } from '../pipeline/migrate-v3.js';
 
-test('migrateDayFileToV3 strips translations and preserves summaries', () => {
+test('migrateDayFileToV3 keeps X translations and preserves podcast/blog summaries', () => {
   const source = {
     schemaVersion: 2,
     day: '2026-08-30',
@@ -25,7 +25,7 @@ test('migrateDayFileToV3 strips translations and preserves summaries', () => {
   const result = migrateDayFileToV3(source);
 
   assert.equal(result.file.schemaVersion, 3);
-  assert.equal(result.file.x[0].textZh, undefined);
+  assert.equal(result.file.x[0].textZh, '译文');
   assert.equal(result.file.x[0].summaryZh, undefined);
   assert.equal(result.file.podcasts[0].titleZh, undefined);
   assert.equal(result.file.podcasts[0].transcriptZh, undefined);
@@ -34,7 +34,7 @@ test('migrateDayFileToV3 strips translations and preserves summaries', () => {
   assert.equal(result.file.blogs[0].contentZh, undefined);
   assert.equal(result.file.blogs[0].summaryZh, '博客总结');
   assert.equal(result.changed, true);
-  assert.deepEqual(result.missingSummaryKeys, ['x:x-1']);
+  assert.deepEqual(result.missingChineseKeys, []);
   assert.equal(source.schemaVersion, 2, '迁移不得修改输入对象');
 });
 
@@ -43,7 +43,7 @@ test('migrateDayFileToV3 is stable for an existing v3 shard', () => {
     schemaVersion: 3,
     day: '2026-08-30',
     generatedAt: '2026-08-30T06:55:52Z',
-    x: [{ id: 'x-1', text: 'English', summaryZh: '总结' }],
+    x: [{ id: 'x-1', text: 'English', textZh: '译文' }],
     podcasts: [],
     blogs: [],
   };
@@ -52,7 +52,7 @@ test('migrateDayFileToV3 is stable for an existing v3 shard', () => {
 
   assert.deepEqual(result.file, source);
   assert.equal(result.changed, false);
-  assert.deepEqual(result.missingSummaryKeys, []);
+  assert.deepEqual(result.missingChineseKeys, []);
 });
 
 test('migrateDayFileToV3 treats non-string summaries as missing', () => {
@@ -60,12 +60,12 @@ test('migrateDayFileToV3 treats non-string summaries as missing', () => {
     schemaVersion: 2,
     day: '2026-08-30',
     generatedAt: '2026-08-30T06:55:52Z',
-    x: [{ id: 'x-1', text: 'English', summaryZh: { translated: true } }],
+    x: [{ id: 'x-1', text: 'English', textZh: { translated: true } }],
     podcasts: [],
     blogs: [],
   };
 
   const result = migrateDayFileToV3(source);
 
-  assert.deepEqual(result.missingSummaryKeys, ['x:x-1']);
+  assert.deepEqual(result.missingChineseKeys, ['x:x-1']);
 });

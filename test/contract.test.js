@@ -15,7 +15,7 @@ const NOW = Date.parse('2026-08-30T12:00:00Z');
 function tweet(overrides = {}) {
   return {
     id: 'x-1', handle: 'builder', builder: 'Builder', bio: '',
-    text: 'English', summaryZh: '中文总结', createdAt: '2026-08-30T01:00:00Z',
+    text: 'English', textZh: '中文译文', createdAt: '2026-08-30T01:00:00Z',
     url: 'https://x.com/builder/status/x-1', likes: 1, retweets: 2, replies: 3,
     ...overrides,
   };
@@ -74,32 +74,32 @@ test('dedupeItems never prefers a non-string summary over valid text', () => {
   assert.equal(result.items[0].author, 'Author');
 });
 
-test('validateDayFile requires summaries and rejects removed translation fields', () => {
+test('validateDayFile requires X translations and rejects obsolete translation fields', () => {
   const value = dayFile('2026-08-30', {
-    x: [tweet({ summaryZh: '', textZh: '旧译文', url: 'javascript:alert(1)' })],
+    x: [tweet({ textZh: '', summaryZh: '旧推文总结', url: 'javascript:alert(1)' })],
     blogs: [blog({ titleZh: '旧标题翻译', contentZh: '旧全文翻译' })],
   });
   const result = validateDayFile(value, { now: NOW, requireAllSummaries: true });
-  assert.ok(result.errors.some(x => x.includes('summaryZh')));
   assert.ok(result.errors.some(x => x.includes('textZh')));
+  assert.ok(result.errors.some(x => x.includes('summaryZh')));
   assert.ok(result.errors.some(x => x.includes('http/https')));
   assert.ok(result.errors.some(x => x.includes('titleZh')));
   assert.ok(result.errors.some(x => x.includes('contentZh')));
 });
 
-test('validateDayFile can downgrade missing summaries during structural migration', () => {
-  const value = dayFile('2026-08-30', { x: [tweet({ summaryZh: '' })] });
+test('validateDayFile can downgrade missing translations during structural migration', () => {
+  const value = dayFile('2026-08-30', { x: [tweet({ textZh: '' })] });
   const result = validateDayFile(value, { now: NOW, requireAllSummaries: false });
   assert.equal(result.errors.length, 0);
-  assert.ok(result.warnings.some(x => x.includes('summaryZh')));
+  assert.ok(result.warnings.some(x => x.includes('textZh')));
 });
 
-test('validateDayFile requires English content and summaries to be non-empty strings', () => {
+test('validateDayFile requires English content and Chinese fields to be non-empty strings', () => {
   for (const invalid of [{}, [], 42]) {
     const invalidSummary = validateDayFile(dayFile('2026-08-30', {
-      x: [tweet({ summaryZh: invalid })],
+      x: [tweet({ textZh: invalid })],
     }));
-    assert.ok(invalidSummary.errors.some(error => error.includes('summaryZh')));
+    assert.ok(invalidSummary.errors.some(error => error.includes('textZh')));
 
     const invalidOriginal = validateDayFile(dayFile('2026-08-30', {
       x: [tweet({ text: invalid })],

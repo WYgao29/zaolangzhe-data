@@ -1,7 +1,7 @@
 const DAY_RE = /^\d{4}-\d{2}-\d{2}$/;
 const KINDS = ['x', 'podcasts', 'blogs'];
-const STRICT_TEXT_FIELDS = new Set(['summaryZh', 'text', 'title', 'transcript', 'content']);
-export const REMOVED_TRANSLATION_FIELDS = ['textZh', 'titleZh', 'contentZh', 'transcriptZh'];
+const STRICT_TEXT_FIELDS = new Set(['textZh', 'summaryZh', 'text', 'title', 'transcript', 'content']);
+export const REMOVED_TRANSLATION_FIELDS = ['titleZh', 'contentZh', 'transcriptZh'];
 export { DAY_RE };
 
 export function beijingDay(ms) {
@@ -32,7 +32,7 @@ function fieldHasValue(field, value) {
 }
 
 export function richnessScore(kind, item) {
-  const zhFields = ['summaryZh'];
+  const zhFields = kind === 'x' ? ['textZh'] : ['summaryZh'];
   const contentFields = kind === 'x' ? ['text'] : kind === 'podcasts' ? ['title', 'transcript'] : ['title', 'content'];
   return zhFields.reduce((n, field) => n + (fieldHasValue(field, item?.[field]) ? 10 : 0), 0)
     + contentFields.reduce((n, field) => n + (fieldHasValue(field, item?.[field]) ? 2 : 0), 0)
@@ -86,8 +86,9 @@ function reportMissing(result, required, location, field) {
   list.push(`${location} 缺少 ${field}`);
 }
 
-export function validateDayFile(value, { requireAllSummaries = true } = {}) {
+export function validateDayFile(value, { requireAllSummaries = true, requiredKinds = null } = {}) {
   const result = validationResult();
+  const required = requiredKinds ? new Set(requiredKinds) : (requireAllSummaries ? new Set(KINDS) : new Set());
   if (!value || typeof value !== 'object') {
     result.errors.push('日分片必须是对象');
     return result;
@@ -114,6 +115,7 @@ export function validateDayFile(value, { requireAllSummaries = true } = {}) {
       }
       if (kind === 'x') {
         if (!hasNonEmptyText(item.text)) result.errors.push(`${location} 缺少 text`);
+        if (Object.hasOwn(item, 'summaryZh')) result.errors.push(`${location} 不允许推文总结字段 summaryZh`);
       } else if (kind === 'podcasts') {
         if (!hasNonEmptyText(item.title)) result.errors.push(`${location} 缺少 title`);
         if (!hasNonEmptyText(item.transcript)) result.errors.push(`${location} 缺少 transcript`);
@@ -121,7 +123,8 @@ export function validateDayFile(value, { requireAllSummaries = true } = {}) {
         if (!hasNonEmptyText(item.title)) result.errors.push(`${location} 缺少 title`);
         if (!hasNonEmptyText(item.content)) result.errors.push(`${location} 缺少 content`);
       }
-      if (!hasNonEmptyText(item.summaryZh)) reportMissing(result, requireAllSummaries, location, 'summaryZh');
+      const chineseField = kind === 'x' ? 'textZh' : 'summaryZh';
+      if (!hasNonEmptyText(item[chineseField])) reportMissing(result, required.has(kind), location, chineseField);
     });
   }
   return result;
@@ -138,7 +141,7 @@ export function buildIndex(dayFiles, generatedAt) {
   return { schemaVersion: 3, generatedAt, days };
 }
 
-export function validateIndex(index, dayFiles, { requireAllSummaries = true } = {}) {
+export function validateIndex(index, dayFiles, { requireAllSummaries = true, requiredKinds = null } = {}) {
   const result = validationResult();
   if (!index || typeof index !== 'object') {
     result.errors.push('index 必须是对象');
@@ -161,7 +164,7 @@ export function validateIndex(index, dayFiles, { requireAllSummaries = true } = 
     const file = dayFiles.get(entry.day);
     if (!file) { result.errors.push(`${entry.day} 缺少日分片`); continue; }
     if (file.day !== entry.day) result.errors.push(`${entry.day} 日分片日期不一致`);
-    const validation = validateDayFile(file, { requireAllSummaries });
+    const validation = validateDayFile(file, { requireAllSummaries, requiredKinds });
     result.errors.push(...validation.errors.map(x => `${entry.day}: ${x}`));
     result.warnings.push(...validation.warnings.map(x => `${entry.day}: ${x}`));
     for (const kind of KINDS) {

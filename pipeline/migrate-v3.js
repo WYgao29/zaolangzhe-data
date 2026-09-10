@@ -48,17 +48,19 @@ export function validateV2Archive(index, dayFiles) {
 
 export function migrateDayFileToV3(value) {
   const file = structuredClone(value);
-  const missingSummaryKeys = [];
+  const missingChineseKeys = [];
   file.schemaVersion = 3;
   for (const kind of KINDS) {
     for (const item of file[kind] || []) {
       for (const field of REMOVED_TRANSLATION_FIELDS) delete item[field];
-      if (!hasNonEmptyText(item.summaryZh)) missingSummaryKeys.push(itemKey(kind, item));
+      if (kind === 'x') delete item.summaryZh;
+      const chineseField = kind === 'x' ? 'textZh' : 'summaryZh';
+      if (!hasNonEmptyText(item[chineseField])) missingChineseKeys.push(itemKey(kind, item));
     }
   }
   return {
     file,
     changed: JSON.stringify(file) !== JSON.stringify(value),
-    missingSummaryKeys,
+    missingChineseKeys,
   };
 }

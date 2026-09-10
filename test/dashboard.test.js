@@ -10,7 +10,7 @@ function fixtureRoot() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'zaolangzhe-dash-'));
   fs.mkdirSync(path.join(root, 'data', 'days'), { recursive: true });
   fs.mkdirSync(path.join(root, 'local'), { recursive: true });
-  fs.writeFileSync(path.join(root, 'data', 'days', '2026-09-05.json'), JSON.stringify({ schemaVersion: 3, day: '2026-09-05', generatedAt: 'x', x: [{ id: 'a', text: 't', summaryZh: 's' }], podcasts: [], blogs: [] }));
+  fs.writeFileSync(path.join(root, 'data', 'days', '2026-09-05.json'), JSON.stringify({ schemaVersion: 3, day: '2026-09-05', generatedAt: 'x', x: [{ id: 'a', text: 't', textZh: '译文' }], podcasts: [], blogs: [] }));
   fs.writeFileSync(path.join(root, 'data', 'index.json'), JSON.stringify({ schemaVersion: 3, generatedAt: 'x', days: [{ day: '2026-09-05', path: 'data/days/2026-09-05.json', counts: { x: 1, podcasts: 0, blogs: 0 } }] }));
   fs.writeFileSync(path.join(root, 'local', 'run-state.json'), JSON.stringify({ running: false, phase: 'idle' }));
   fs.writeFileSync(path.join(root, 'local', 'history.jsonl'), JSON.stringify({ startedAt: 'a', processed: 3 }) + '\n');

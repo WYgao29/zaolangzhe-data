@@ -22,8 +22,8 @@ import * as Process from '../pipeline/process.js';
 
 const NOW = Date.parse('2026-08-30T12:00:00Z');
 
-function tweet(id, summaryZh = '中文总结') {
-  return { id, handle: 'a', builder: 'A', bio: '', text: `tweet ${id}`, summaryZh, createdAt: '2026-08-30T01:00:00Z', url: `https://x.com/a/status/${id}` };
+function tweet(id, textZh = '中文译文') {
+  return { id, handle: 'a', builder: 'A', bio: '', text: `tweet ${id}`, textZh, createdAt: '2026-08-30T01:00:00Z', url: `https://x.com/a/status/${id}` };
 }
 
 function dayFile(day, overrides = {}) {
@@ -36,8 +36,8 @@ function writeRepositoryFixture(root, indexValue, dayValue) {
   if (dayValue) fs.writeFileSync(path.join(root, 'data', 'days', `${dayValue.day}.json`), JSON.stringify(dayValue));
 }
 
-test('mergeIncoming adds new keys and preserves an existing summary', () => {
-  const days = new Map([['2026-08-30', dayFile('2026-08-30', { x: [tweet('existing', '已有总结')] })]]);
+test('mergeIncoming adds new keys and preserves an existing translation', () => {
+  const days = new Map([['2026-08-30', dayFile('2026-08-30', { x: [tweet('existing', '已有译文')] })]]);
   const result = mergeIncoming(days, {
     day: '2026-08-30', generatedAt: '2026-08-30T08:00:00Z',
     x: [tweet('existing', ''), tweet('new', '')], podcasts: [], blogs: [],
@@ -46,7 +46,7 @@ test('mergeIncoming adds new keys and preserves an existing summary', () => {
   assert.equal(result.addedKeys.has('x:new'), true);
   assert.equal(result.duplicates, 1);
   assert.equal(days.get('2026-08-30').x.length, 2);
-  assert.equal(days.get('2026-08-30').x.find(x => x.id === 'existing').summaryZh, '已有总结');
+  assert.equal(days.get('2026-08-30').x.find(x => x.id === 'existing').textZh, '已有译文');
 });
 
 test('mergeIncoming does not mark an identical upstream snapshot as changed', () => {
@@ -60,7 +60,7 @@ test('mergeIncoming does not mark an identical upstream snapshot as changed', ()
   assert.equal(result.changedDays.size, 0);
 });
 
-test('buildWorkQueue includes new items and recent summary gaps exactly once', () => {
+test('buildWorkQueue includes new items and recent translation gaps exactly once', () => {
   const days = new Map([
     ['2026-08-30', dayFile('2026-08-30', { x: [tweet('new', ''), tweet('missing', '')] })],
     ['2026-08-20', dayFile('2026-08-20', { x: [tweet('old-missing', '')] })],
@@ -71,7 +71,7 @@ test('buildWorkQueue includes new items and recent summary gaps exactly once', (
   assert.equal(result.selfHealCount, 1);
 });
 
-test('buildWorkQueue does not spend AI tokens on a new item that already has a summary', () => {
+test('buildWorkQueue does not spend AI tokens on a new item that already has a translation', () => {
   const days = new Map([
     ['2026-08-30', dayFile('2026-08-30', { x: [tweet('already-summarized')] })],
   ]);
@@ -80,7 +80,17 @@ test('buildWorkQueue does not spend AI tokens on a new item that already has a s
   assert.equal(result.newCount, 0);
 });
 
-test('v3 migration queues old missing summaries when includeAllMissing is true', () => {
+test('X-only AI mode does not queue podcast or blog summary gaps', () => {
+  const days = new Map([['2026-08-30', dayFile('2026-08-30', {
+    x: [tweet('x-missing', '')],
+    podcasts: [{ guid: 'pod-missing', title: 'Episode', transcript: 'English transcript', summaryZh: '' }],
+    blogs: [{ url: 'https://example.com/post', title: 'Post', content: 'English body', summaryZh: '' }],
+  })]]);
+  const result = buildWorkQueue(days, { now: NOW, aiEnabled: true, aiKinds: ['x'] });
+  assert.deepEqual(result.work.map(entry => entry.key), ['x:x-missing']);
+});
+
+test('v3 migration queues old missing translations when includeAllMissing is true', () => {
   const files = new Map([
     ['2026-01-01', dayFile('2026-01-01', { x: [tweet('old', '')] })],
   ]);
@@ -90,29 +100,40 @@ test('v3 migration queues old missing summaries when includeAllMissing is true',
   assert.deepEqual(migration.work.map(entry => entry.key), ['x:old']);
 });
 
-test('buildWorkQueue leaves missing summaries untouched when AI is paused', () => {
+test('buildWorkQueue leaves missing translations untouched when AI is paused', () => {
   const days = new Map([
     ['2026-08-30', dayFile('2026-08-30', { x: [tweet('english-only', '')] })],
   ]);
   const result = buildWorkQueue(days, { addedKeys: new Set(['x:english-only']), now: NOW });
   assert.deepEqual(result, { work: [], newCount: 0, selfHealCount: 0 });
   assert.equal(days.get('2026-08-30').x[0].text, 'tweet english-only');
-  assert.equal(days.get('2026-08-30').x[0].summaryZh, '');
+  assert.equal(days.get('2026-08-30').x[0].textZh, '');
 });
 
 test('AI restore mode is explicit, strict, and can include the full missing backlog', () => {
   assert.deepEqual(Process.resolveAIMode([], {}), {
     enabled: false,
+    kinds: [],
     includeAllMissing: false,
     requireAllSummaries: false,
+    requiredKinds: [],
   });
   assert.deepEqual(Process.resolveAIMode(
     ['--include-all-missing'],
     { AI_PROCESSING_ENABLED: 'true' },
   ), {
     enabled: true,
+    kinds: ['x', 'podcasts', 'blogs'],
     includeAllMissing: true,
     requireAllSummaries: true,
+    requiredKinds: ['x', 'podcasts', 'blogs'],
+  });
+  assert.deepEqual(Process.resolveAIMode([], { X_TRANSLATION_ENABLED: 'true' }), {
+    enabled: true,
+    kinds: ['x'],
+    includeAllMissing: false,
+    requireAllSummaries: false,
+    requiredKinds: ['x'],
   });
 });
 
@@ -155,8 +176,29 @@ test('loadRepository migrates v2 shards in memory only when explicitly enabled',
   const migrated = loadRepository(root, { migrateV2: true });
   assert.equal(migrated.index.schemaVersion, 3);
   assert.deepEqual([...migrated.migratedDays], ['2026-08-30']);
-  assert.equal(migrated.dayFiles.get('2026-08-30').x[0].textZh, undefined);
+  assert.equal(migrated.dayFiles.get('2026-08-30').x[0].textZh, '旧译文');
   assert.equal(JSON.parse(fs.readFileSync(path.join(root, 'data', 'index.json'))).schemaVersion, 2, '加载迁移不得提前写盘');
+  fs.rmSync(root, { recursive: true, force: true });
+});
+
+test('loadRepository normalizes legacy X summaries in an existing v3 shard', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'zaolangzhe-legacy-x-summary-'));
+  fs.mkdirSync(path.join(root, 'data', 'days'), { recursive: true });
+  const legacyDay = dayFile('2026-08-30', {
+    x: [{ ...tweet('one', ''), textZh: undefined, summaryZh: '旧推文总结' }],
+  });
+  delete legacyDay.x[0].textZh;
+  fs.writeFileSync(path.join(root, 'data', 'days', '2026-08-30.json'), JSON.stringify(legacyDay));
+  fs.writeFileSync(path.join(root, 'data', 'index.json'), JSON.stringify({
+    schemaVersion: 3, generatedAt: legacyDay.generatedAt,
+    days: [{ day: legacyDay.day, path: 'data/days/2026-08-30.json', counts: { x: 1, podcasts: 0, blogs: 0 } }],
+  }));
+
+  const migrated = loadRepository(root, { migrateV2: true });
+  const item = migrated.dayFiles.get('2026-08-30').x[0];
+  assert.equal(item.summaryZh, undefined);
+  assert.equal(item.textZh, undefined);
+  assert.deepEqual([...migrated.migratedDays], ['2026-08-30']);
   fs.rmSync(root, { recursive: true, force: true });
 });
 
@@ -388,32 +430,33 @@ test('processTweet segments rare oversized long-form posts', async () => {
   const calls = [];
   const aiCall = async (messages) => {
     calls.push(messages);
-    if (calls.length <= 3) return `第${calls.length}段要点。`;
-    return '整合后的长文推文总结。';
+    if (calls.length <= 3) return `第${calls.length}段译文。`;
+    return '整合后的长文推文译文。';
   };
   await processTweet(item, aiCall);
   assert.equal(calls.length, 4);
-  assert.equal(item.summaryZh, '整合后的长文推文总结。');
-  assert.doesNotMatch(item.summaryZh, /^\{/, '长文推文汇总走纯文本而非 JSON');
+  assert.equal(item.textZh, '整合后的长文推文译文。');
+  assert.equal(item.summaryZh, undefined);
+  assert.doesNotMatch(item.textZh, /^\{/, '长文推文译文走纯文本而非 JSON');
 });
 
 test('requireAIText rejects empty model output before state can advance', () => {
-  assert.throws(() => requireAIText('   ', '推文总结'), /推文总结为空/);
-  assert.throws(() => requireAIText({ value: '伪总结' }, '推文总结'), /推文总结为空/);
-  assert.equal(requireAIText('  有效内容  ', '推文总结'), '有效内容');
+  assert.throws(() => requireAIText('   ', '推文译文'), /推文译文为空/);
+  assert.throws(() => requireAIText({ value: '伪译文' }, '推文译文'), /推文译文为空/);
+  assert.equal(requireAIText('  有效内容  ', '推文译文'), '有效内容');
 });
 
-test('tweet processing stores a semantic summary instead of a translation', async () => {
+test('tweet processing stores a complete Chinese translation', async () => {
   const calls = [];
   const item = { text: 'We shipped a faster model today.' };
   await processTweet(item, async (messages) => {
     calls.push(messages);
     return '团队发布了速度更快的新模型。';
   });
-  assert.equal(item.summaryZh, '团队发布了速度更快的新模型。');
-  assert.equal(item.textZh, undefined);
-  assert.match(calls[0][0].content, /总结/);
-  assert.match(calls[0][0].content, /不要逐句翻译/);
+  assert.equal(item.textZh, '团队发布了速度更快的新模型。');
+  assert.equal(item.summaryZh, undefined);
+  assert.match(calls[0][0].content, /翻译/);
+  assert.match(calls[0][0].content, /不要总结/);
 });
 
 test('podcast processing keeps only the Chinese summary', async () => {

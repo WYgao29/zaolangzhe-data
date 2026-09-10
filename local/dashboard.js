@@ -66,7 +66,8 @@ function scanData(root) {
     for (const kind of ['x', 'podcasts', 'blogs']) {
       for (const item of file[kind] || []) {
         items++;
-        if (!String(item.summaryZh || '').trim()) missingSummaries++;
+        const chinese = kind === 'x' ? item.textZh : item.summaryZh;
+        if (!String(chinese || '').trim()) missingSummaries++;
       }
     }
   }

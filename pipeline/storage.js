@@ -29,7 +29,7 @@ function validateIndexPathsForRead(index) {
   }
 }
 
-export function loadRepository(root, { migrateV2 = false, requireAllSummaries = true } = {}) {
+export function loadRepository(root, { migrateV2 = false, requireAllSummaries = true, requiredKinds = null } = {}) {
   const indexPath = path.join(root, 'data', 'index.json');
   let index = readJSON(indexPath);
   if (migrateV2 && index.schemaVersion === 2) validateV2Index(index);
@@ -37,8 +37,11 @@ export function loadRepository(root, { migrateV2 = false, requireAllSummaries = 
   const dayFiles = new Map();
   for (const entry of index.days || []) dayFiles.set(entry.day, readJSON(path.join(root, entry.path)));
   const migratedDays = new Set();
-  if (migrateV2 && index.schemaVersion === 2) {
-    validateV2Archive(index, dayFiles);
+  const hasLegacyXSummaries = [...dayFiles.values()].some(file =>
+    (file.x || []).some(item => Object.hasOwn(item, 'summaryZh')),
+  );
+  if (migrateV2 && (index.schemaVersion === 2 || hasLegacyXSummaries)) {
+    if (index.schemaVersion === 2) validateV2Archive(index, dayFiles);
     for (const [day, file] of dayFiles) {
       const migrated = migrateDayFileToV3(file);
       dayFiles.set(day, migrated.file);
@@ -47,7 +50,7 @@ export function loadRepository(root, { migrateV2 = false, requireAllSummaries = 
     index = buildIndex(dayFiles, index.generatedAt);
     requireAllSummaries = false;
   }
-  const validation = validateIndex(index, dayFiles, { requireAllSummaries });
+  const validation = validateIndex(index, dayFiles, { requireAllSummaries, requiredKinds });
   if (validation.errors.length) throw new Error('数据仓校验失败:\n' + validation.errors.join('\n'));
   return { index, dayFiles, warnings: validation.warnings, migratedDays };
 }
@@ -116,14 +119,14 @@ export function mergeIncoming(dayFiles, incoming) {
   return { addedKeys, changedDays, duplicates };
 }
 
-function missingSummary(item) {
-  return !hasNonEmptyText(item.summaryZh);
+function missingChineseField(kind, item) {
+  return kind === 'x' ? !hasNonEmptyText(item.textZh) : !hasNonEmptyText(item.summaryZh);
 }
 
 export function buildWorkQueue(dayFiles, {
-  addedKeys = new Set(), now = Date.now(), includeAllMissing = false, aiEnabled = false, recentDays = 2,
+  addedKeys = new Set(), now = Date.now(), includeAllMissing = false, aiEnabled = false, aiKinds = KINDS, recentDays = 2,
 } = {}) {
-  // AI 总结暂停时返回空队列。显式传入 aiEnabled: true 才会生成任务。
+  // AI 加工可由运行时显式开启；X 生成 textZh，播客/博客继续生成 summaryZh。
   if (!aiEnabled) return { work: [], newCount: 0, selfHealCount: 0 };
   const cutoff = beijingDay(now - Math.max(0, recentDays) * DAY);
   const work = [];
@@ -132,10 +135,11 @@ export function buildWorkQueue(dayFiles, {
   for (const [day, file] of dayFiles) {
     if (!includeAllMissing && day < cutoff) continue;
     for (const kind of KINDS) {
+      if (!aiKinds.includes(kind)) continue;
       for (const item of file[kind]) {
         const key = itemKey(kind, item);
         const isNew = addedKeys.has(key);
-        if (!missingSummary(item)) continue;
+        if (!missingChineseField(kind, item)) continue;
         work.push({ kind, key, day, item });
         if (isNew) newCount++;
         else selfHealCount++;
@@ -145,7 +149,7 @@ export function buildWorkQueue(dayFiles, {
   return { work, newCount, selfHealCount };
 }
 
-export function writeRepository(root, dayFiles, generatedAt, changedDays = new Set(dayFiles.keys()), { requireAllSummaries = true } = {}) {
+export function writeRepository(root, dayFiles, generatedAt, changedDays = new Set(dayFiles.keys()), { requireAllSummaries = true, requiredKinds = null } = {}) {
   // sink 防御：day 键拼进文件路径，非日历日在写任何临时文件之前直接拒绝。
   // 正常调用链里 dayFiles 已经过 validateIndex 的 DAY_RE 校验，这里是独立不变量。
   for (const day of changedDays) {
@@ -157,9 +161,9 @@ export function writeRepository(root, dayFiles, generatedAt, changedDays = new S
     atomicWriteJSON(path.join(root, 'data', 'days', `${day}.json`), file, (value) => {
       const files = new Map(dayFiles);
       files.set(day, value);
-      return validateIndex(buildIndex(files, generatedAt), files, { requireAllSummaries });
+      return validateIndex(buildIndex(files, generatedAt), files, { requireAllSummaries, requiredKinds });
     });
   }
-  atomicWriteJSON(path.join(root, 'data', 'index.json'), index, (value) => validateIndex(value, dayFiles, { requireAllSummaries }));
+  atomicWriteJSON(path.join(root, 'data', 'index.json'), index, (value) => validateIndex(value, dayFiles, { requireAllSummaries, requiredKinds }));
   return index;
 }

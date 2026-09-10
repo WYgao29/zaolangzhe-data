@@ -18,14 +18,18 @@ const DAY = 86400000;
 
 const args = process.argv.slice(2);
 export function resolveAIMode(runtimeArgs = [], env = {}) {
-  const enabled = String(env.AI_PROCESSING_ENABLED || '').toLowerCase() === 'true';
+  const xTranslationEnabled = String(env.X_TRANSLATION_ENABLED || '').toLowerCase() === 'true';
+  const summariesEnabled = String(env.AI_PROCESSING_ENABLED || '').toLowerCase() === 'true';
+  const kinds = summariesEnabled ? ['x', 'podcasts', 'blogs'] : xTranslationEnabled ? ['x'] : [];
   return {
-    enabled,
-    includeAllMissing: enabled && runtimeArgs.includes('--include-all-missing'),
-    requireAllSummaries: enabled,
+    enabled: kinds.length > 0,
+    kinds,
+    includeAllMissing: kinds.length > 0 && runtimeArgs.includes('--include-all-missing'),
+    requireAllSummaries: summariesEnabled,
+    requiredKinds: kinds,
   };
 }
-const AI_MODE = resolveAIMode(args, process.env); // Actions 不设置开关，默认纯英文。
+const AI_MODE = resolveAIMode(args, process.env); // 默认不调用 AI；生产环境单独开启。
 const getArg = (name) => {
   const index = args.indexOf('--' + name);
   if (index === -1) return undefined;
@@ -177,8 +181,8 @@ export function splitIntoChunks(text, maxChars = CHUNK_CHARS, maxChunks = MAX_CH
 
 const CHUNK_PROMPTS = {
   x: {
-    map: '你是科技资讯编辑。以下是一条长推文的一段节选，用简体中文提取该段的关键信息要点，1–3 句；保留关键人物、产品名、数字和结论。',
-    reduce: '你是科技资讯编辑。以下是同一条长推文各段的中文要点，请整合成一条简体中文总结，通常 1–2 句、约 80 个中文字符以内；保留关键人物、产品名、数字和结论；只输出总结，不要解释或加引号。',
+    map: '你是专业的科技翻译。以下是一条长推文的一段节选，请完整翻译成简体中文，保留原有换行、@提及、链接、话题标签、产品名、专有名词和数字；不要总结、解释或加引号，只输出译文。',
+    reduce: '你是专业的科技翻译。以下是同一条长推文按原顺序分段得到的中文译文，请按原顺序拼接并还原完整译文，不要总结、删减、解释或加引号，只输出译文。',
     reduceJSON: false,
   },
   podcasts: {
@@ -219,12 +223,13 @@ async function summarizeLongText(kind, text, aiCall, label) {
 }
 
 export async function processTweet(item, aiCall = ai) {
-  const long = await summarizeLongText('x', item.text, aiCall, '推文总结');
-  if (long !== null) { item.summaryZh = long; return; }
-  item.summaryZh = requireAIText(await aiCall([
-    { role: 'system', content: '你是科技资讯编辑。用简体中文总结英文推文的核心信息，通常 1–2 句、约 80 个中文字符以内；保留关键人物、产品名、数字和结论；忽略非关键链接、@提及和话题标签；不要逐句翻译，不要解释或加引号，只输出总结。若推文只有链接没有正文，输出"分享了一条链接，未附文字说明。"' },
+  const long = await summarizeLongText('x', item.text, aiCall, '推文译文');
+  if (long !== null) { item.textZh = long; delete item.summaryZh; return; }
+  item.textZh = requireAIText(await aiCall([
+    { role: 'system', content: '你是专业的科技翻译。将英文推文完整翻译成简体中文：准确、自然，保留原有换行、@提及、链接、话题标签、产品名、专有名词和数字；只输出译文，不要总结、解释或加引号。' },
     { role: 'user', content: item.text },
-  ]), '推文总结');
+  ]), '推文译文');
+  delete item.summaryZh;
 }
 
 export async function processPodcast(item, aiCall = ai) {
@@ -341,6 +346,7 @@ export async function main() {
     addedKeys,
     includeAllMissing: repository.migratedDays.size > 0 || AI_MODE.includeAllMissing,
     aiEnabled: AI_MODE.enabled,
+    aiKinds: AI_MODE.enabled ? ['x', 'podcasts', 'blogs'] : [],
   });
   const work = queue.work.slice(0, LIMIT === Infinity ? undefined : LIMIT);
   console.log(AI_MODE.enabled
@@ -376,10 +382,12 @@ export async function main() {
   const index = buildIndex(repository.dayFiles, generatedAt);
   const finalValidation = validateIndex(index, repository.dayFiles, {
     requireAllSummaries: AI_MODE.requireAllSummaries,
+    requiredKinds: AI_MODE.requiredKinds,
   });
   if (finalValidation.errors.length) throw new Error('最终数据校验失败:\n' + finalValidation.errors.join('\n'));
   writeRepository(ROOT, repository.dayFiles, generatedAt, changedDays, {
     requireAllSummaries: AI_MODE.requireAllSummaries,
+    requiredKinds: AI_MODE.requiredKinds,
   });
   await purge(['data/index.json', ...[...changedDays].map(day => `data/days/${day}.json`)]);
   console.log(`完成：成功 ${done}，失败 ${failed}，更新 ${changedDays.size} 天`);

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /* 本地全量任务（launchd 定时触发）：
  * 1. 归档：抓上游英文快照并合并进日分片（断档时自动按缺口天数回放历史提交）
- * 2. 总结：为缺 summaryZh 的条目调用本地 OpenAI 兼容端点（MLX/LM Studio/Ollama）
+ * 2. AI 加工：为缺 textZh/summaryZh 的条目调用本地 OpenAI 兼容端点（MLX/LM Studio/Ollama）
  * 3. 发布：校验通过后一次提交推送 + jsDelivr 刷新
  * 分片即检查点——每完成一步原子写盘，崩溃重跑自动续；AI 失败不阻塞归档发布。 */
 'use strict';
@@ -100,7 +100,7 @@ export async function runSummarizer({
   const queue = buildQueue(repository);
   const work = { total: queue.work.length, done: 0, failed: 0 };
   report({ phase: 'summarize', work: { ...work } });
-  log(`待总结 ${queue.work.length} 条（新增 ${queue.newCount} · 自愈 ${queue.selfHealCount}）`);
+  log(`待 AI 加工 ${queue.work.length} 条（新增 ${queue.newCount} · 自愈 ${queue.selfHealCount}）`);
   if (!queue.work.length) log('没有需要总结的条目');
 
   let processed = 0;
