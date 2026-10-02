@@ -9,3 +9,5 @@ local/logs/
 local/run-state.json
 local/history.jsonl
 local/trigger-request.json
+local/daily-rule-stamp
+local/daily-rule-stamp.*

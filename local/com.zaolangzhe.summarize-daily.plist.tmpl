@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- 新规则：local/install.sh 默认加载本模板。旧的每小时规则保留在 com.zaolangzhe.summarize.plist.tmpl。 -->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.zaolangzhe.summarize-daily</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/zsh</string>
+    <string>__REPO__/local/summarize-daily.sh</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>__REPO__</string>
+
+  <!-- launchd 默认无 UTF-8 locale，zsh 会打不开中文路径；必须显式指定 -->
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>LANG</key>
+    <string>zh_CN.UTF-8</string>
+  </dict>
+
+  <!-- 北京时间每天 24:00（即 00:00）只排一次。
+       不设 KeepAlive：失败不会被 launchd 拉起重跑。
+       当天第二次启动由 local/summarize-daily.sh 的日期印记直接跳过。
+       Mac 睡觉错过 24:00 时，唤醒后仍会补跑这一次；补跑也只算当天这一次。 -->
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Hour</key>
+    <integer>0</integer>
+    <key>Minute</key>
+    <integer>0</integer>
+  </dict>
+
+  <key>StandardOutPath</key>
+  <string>__REPO__/local/logs/launchd-daily.log</string>
+  <key>StandardErrorPath</key>
+  <string>__REPO__/local/logs/launchd-daily.log</string>
+</dict>
+</plist>

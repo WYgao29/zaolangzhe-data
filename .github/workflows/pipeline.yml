@@ -1,7 +1,8 @@
 name: pipeline
 
 # 全本地架构下的应急通道：日常归档与中文总结全部由本地 launchd 任务完成
-# （com.zaolangzhe.summarize，北京时间 15:40-21:40 每小时）。
+# （当前规则 com.zaolangzhe.summarize-daily，北京时间每天 24:00 一次，当天不重跑。
+#  旧规则 com.zaolangzhe.summarize，15:40-21:40 每小时，仍保留，可用 install.sh hourly 恢复）。
 # 仅保留手动触发，用于 Mac 长期不可用时的云端应急回填；
 # 单写者守卫对所有事件生效——本地总结活跃时手动触发也会自动跳过。
 on:

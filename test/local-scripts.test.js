@@ -49,3 +49,50 @@ test('install script locks local/env to owner-only permissions', () => {
   const script = fs.readFileSync(new URL('../local/install.sh', import.meta.url), 'utf8');
   assert.match(script, /chmod 600 "\$REPO\/local\/env"/);
 });
+
+test('daily rule is the default schedule and the hourly rule is retained', () => {
+  const install = fs.readFileSync(new URL('../local/install.sh', import.meta.url), 'utf8');
+  const daily = fs.readFileSync(new URL('../local/com.zaolangzhe.summarize-daily.plist.tmpl', import.meta.url), 'utf8');
+  const hourly = fs.readFileSync(new URL('../local/com.zaolangzhe.summarize.plist.tmpl', import.meta.url), 'utf8');
+
+  assert.match(install, /RULE="\$\{1:-daily\}"/);
+  assert.match(install, /install_one summarize-daily/);
+  assert.match(install, /unload_one summarize/);
+  assert.match(install, /install_one summarize/);
+  assert.match(daily, /<key>Hour<\/key>\s*<integer>0<\/integer>/);
+  assert.match(daily, /<key>Minute<\/key>\s*<integer>0<\/integer>/);
+  assert.doesNotMatch(daily, /<key>KeepAlive<\/key>/);
+  assert.equal((daily.match(/<key>Hour<\/key>/g) || []).length, 1);
+  for (const hour of [15, 16, 17, 18, 19, 20, 21]) {
+    assert.match(hourly, new RegExp(`<key>Hour</key><integer>${hour}</integer>`));
+  }
+});
+
+test('daily rule runs once per Beijing day even when the first run fails', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'zaolangzhe-daily-'));
+  const local = path.join(root, 'local');
+  fs.mkdirSync(local, { recursive: true });
+  fs.copyFileSync(new URL('../local/summarize-daily.sh', import.meta.url), path.join(local, 'summarize-daily.sh'));
+  fs.chmodSync(path.join(local, 'summarize-daily.sh'), 0o755);
+  const marker = path.join(root, 'ran');
+  fs.writeFileSync(path.join(local, 'summarize.sh'), `#!/bin/zsh
+echo ran >> "${marker}"
+exit 1
+`);
+  fs.chmodSync(path.join(local, 'summarize.sh'), 0o755);
+
+  const script = path.join(local, 'summarize-daily.sh');
+  const first = spawnSync('/bin/zsh', [script], { cwd: root, encoding: 'utf8' });
+  const second = spawnSync('/bin/zsh', [script], { cwd: root, encoding: 'utf8' });
+  const day = spawnSync('/bin/zsh', ['-c', 'TZ=Asia/Shanghai date +%F'], { encoding: 'utf8' });
+
+  try {
+    assert.equal(first.status, 1, first.stderr);
+    assert.equal(second.status, 0, second.stderr);
+    assert.equal(fs.readFileSync(marker, 'utf8').trim(), 'ran');
+    assert.equal(fs.readFileSync(path.join(local, 'daily-rule-stamp'), 'utf8').trim(), day.stdout.trim());
+    assert.match(fs.readFileSync(path.join(local, 'logs', 'summarize.log'), 'utf8'), /不再重复/);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
