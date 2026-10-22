@@ -8,16 +8,42 @@ set -euo pipefail
 
 RULE="${1:-daily}"
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
-NODE_BIN="$(command -v node || true)"
+ENV_FILE="$REPO/local/env"
+touch "$ENV_FILE"
+CONFIGURED_NODE_BIN="$(sed -n 's/^NODE_BIN=//p' "$ENV_FILE" | head -n 1)"
+if [ -n "$CONFIGURED_NODE_BIN" ] && [ -x "$CONFIGURED_NODE_BIN" ]; then
+  NODE_BIN="$CONFIGURED_NODE_BIN"
+elif [ -x /opt/homebrew/bin/node ]; then
+  NODE_BIN=/opt/homebrew/bin/node
+elif [ -x /usr/local/bin/node ]; then
+  NODE_BIN=/usr/local/bin/node
+else
+  NODE_BIN="$(command -v node || true)"
+fi
 if [ -z "$NODE_BIN" ]; then
   echo "未找到 node，请先安装或手动在 local/env 里设置 NODE_BIN" >&2
   exit 1
 fi
 
 # launchd 环境没有用户 PATH，把 node 绝对路径写进 local/env（不影响其他键）
-touch "$REPO/local/env"
-grep -q '^NODE_BIN=' "$REPO/local/env" || echo "NODE_BIN=$NODE_BIN" >> "$REPO/local/env"
-chmod 600 "$REPO/local/env"
+if [ -n "$CONFIGURED_NODE_BIN" ]; then
+  if [ "$CONFIGURED_NODE_BIN" != "$NODE_BIN" ]; then
+    awk -v node="$NODE_BIN" '
+      BEGIN { replaced = 0 }
+      /^NODE_BIN=/ {
+        if (!replaced) print "NODE_BIN=" node
+        replaced = 1
+        next
+      }
+      { print }
+      END { if (!replaced) print "NODE_BIN=" node }
+    ' "$ENV_FILE" > "$ENV_FILE.tmp"
+    mv "$ENV_FILE.tmp" "$ENV_FILE"
+  fi
+else
+  echo "NODE_BIN=$NODE_BIN" >> "$ENV_FILE"
+fi
+chmod 600 "$ENV_FILE"
 
 mkdir -p "$REPO/local/logs" "$HOME/Library/LaunchAgents"
 chmod +x "$REPO/local/summarize.sh" "$REPO/local/summarize-daily.sh" "$REPO/local/runner.sh" 2>/dev/null || true
