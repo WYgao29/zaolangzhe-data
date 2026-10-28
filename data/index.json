@@ -1,7 +1,16 @@
 {
   "schemaVersion": 3,
-  "generatedAt": "2026-10-27T16:00:11.690Z",
+  "generatedAt": "2026-10-28T16:00:11.711Z",
   "days": [
+    {
+      "day": "2026-10-28",
+      "path": "data/days/2026-10-28.json",
+      "counts": {
+        "x": 29,
+        "podcasts": 0,
+        "blogs": 0
+      }
+    },
     {
       "day": "2026-10-27",
       "path": "data/days/2026-10-27.json",
